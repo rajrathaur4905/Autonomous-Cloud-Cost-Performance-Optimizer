@@ -1,0 +1,23 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Virtual environment (NEVER commit this — it's huge and machine-specific)
+venv/
+.venv/
+
+# Environment secrets (CRITICAL — API keys must NEVER be on GitHub)
+.env
+
+# IDE settings (personal preferences, not project code)
+.vscode/
+.idea/
+
+# OS junk
+Thumbs.db
+.DS_Store
+
+# Data files (too large for git, and may contain sensitive metrics)
+*.db
+*.sqlite3
+data/
