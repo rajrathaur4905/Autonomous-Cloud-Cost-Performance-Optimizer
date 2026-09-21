@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="ACCPO — Autonomous Cloud Cost & Performance Optimizer" />
+  <title>ACCPO — Cloud Optimization Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark"><i class="fa-solid fa-bolt"></i></div>
+        <div class="brand-copy">
+          <strong>ACCPO</strong>
+          <span>Cloud Optimizer</span>
+        </div>
+      </div>
+
+      <button class="sidebar-toggle" id="sidebarToggle" aria-label="Collapse sidebar">
+        <i class="fa-solid fa-angles-left"></i>
+      </button>
+
+      <nav class="nav">
+        <p class="nav-label">Workspace</p>
+        <button class="nav-item active" data-section="overview"><i class="fa-solid fa-grid-2"></i><span>Dashboard</span></button>
+        <button class="nav-item" data-section="resources"><i class="fa-solid fa-server"></i><span>Cloud Resources</span></button>
+        <button class="nav-item" data-section="cost"><i class="fa-solid fa-chart-pie"></i><span>Cost Analytics</span></button>
+        <button class="nav-item" data-section="performance"><i class="fa-solid fa-gauge-high"></i><span>Performance</span></button>
+        <button class="nav-item" data-section="optimizer"><i class="fa-solid fa-wand-magic-sparkles"></i><span>AI Optimizer</span></button>
+        <button class="nav-item" data-section="actions"><i class="fa-solid fa-bolt"></i><span>Autonomous Actions</span></button>
+        <button class="nav-item" data-section="alerts"><i class="fa-solid fa-bell"></i><span>Alerts</span><span class="nav-badge">4</span></button>
+        <button class="nav-item" data-section="settings"><i class="fa-solid fa-sliders"></i><span>Settings</span></button>
+      </nav>
+
+      <div class="sidebar-status">
+        <div class="status-dot"></div>
+        <div><strong>All systems operational</strong><span>AI engine online</span></div>
+      </div>
+    </aside>
+
+    <div class="mobile-backdrop" id="mobileBackdrop"></div>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="mobile-menu" id="mobileMenu" aria-label="Open navigation"><i class="fa-solid fa-bars"></i></button>
+          <div>
+            <h1 id="pageTitle">Dashboard</h1>
+            <div class="breadcrumb">ACCPO <span>/</span> <span id="breadcrumbText">Overview</span></div>
+          </div>
+        </div>
+
+        <div class="topbar-right">
+          <button class="icon-btn search-trigger" id="searchTrigger" title="Search"><i class="fa-solid fa-magnifying-glass"></i></button>
+          <div class="notification-wrap">
+            <button class="icon-btn notification-trigger" id="notificationTrigger" title="Notifications"><i class="fa-regular fa-bell"></i><em>4</em></button>
+            <div class="notification-dropdown" id="notificationDropdown">
+              <div class="dropdown-head"><strong>Notifications</strong><span>4 new</span></div>
+              <div class="notification-item critical"><i class="fa-solid fa-circle-exclamation"></i><div><strong>EKS latency exceeded SLA</strong><small>8 minutes ago</small></div></div>
+              <div class="notification-item warning"><i class="fa-solid fa-triangle-exclamation"></i><div><strong>Low EC2 utilization detected</strong><small>21 minutes ago</small></div></div>
+              <div class="notification-item info"><i class="fa-solid fa-sparkles"></i><div><strong>New optimization opportunity</strong><small>42 minutes ago</small></div></div>
+              <button class="dropdown-action" id="viewAlerts">View all alerts</button>
+            </div>
+          </div>
+
+          <label class="select-wrap">
+            <i class="fa-solid fa-layer-group"></i>
+            <select id="environmentSelect" aria-label="Environment">
+              <option>Production</option><option>Staging</option><option>Development</option>
+            </select>
+          </label>
+          <label class="select-wrap cloud-select">
+            <i class="fa-brands fa-aws"></i>
+            <select id="cloudSelect" aria-label="Cloud provider">
+              <option>AWS</option><option>Azure</option><option>GCP</option>
+            </select>
+          </label>
+          <div class="avatar">KA</div>
+        </div>
+      </header>
+
+      <div class="content" id="content">
+        <section class="dashboard-section active" data-view="overview">
+          <div class="ai-hero">
+            <div class="hero-glow"></div>
+            <div class="ai-orb"><div class="orb-core"><i class="fa-solid fa-brain"></i></div></div>
+            <div class="hero-copy">
+              <div class="eyebrow"><span class="live-dot"></span> AUTONOMOUS MODE ACTIVE</div>
+              <h2>AI Optimization Engine</h2>
+              <p>AI is continuously analyzing cloud workloads, cost patterns and performance metrics.</p>
+              <div class="hero-stats">
+                <div><span>Resources monitored</span><strong>128</strong></div>
+                <div><span>Optimization opportunities</span><strong>18</strong></div>
+                <div><span>Actions today</span><strong>47</strong></div>
+                <div><span>Estimated monthly savings</span><strong>$3,240</strong></div>
+              </div>
+            </div>
+            <div class="hero-health"><span>Engine health</span><strong>99.9%</strong><div class="health-line"><i></i></div></div>
+          </div>
+
+          <div class="kpi-grid">
+            <article class="kpi-card">
+              <div class="kpi-head"><span>Monthly Cloud Cost</span><i class="fa-solid fa-cloud-arrow-up"></i></div>
+              <div class="kpi-value" data-count="12480" data-prefix="$" data-decimals="0">$0</div>
+              <div class="kpi-foot negative"><i class="fa-solid fa-arrow-trend-up"></i> +2.4% vs last month</div>
+              <div class="sparkline"><span style="height:28%"></span><span style="height:45%"></span><span style="height:35%"></span><span style="height:52%"></span><span style="height:43%"></span><span style="height:67%"></span><span style="height:59%"></span><span style="height:76%"></span><span style="height:70%"></span><span style="height:86%"></span></div>
+            </article>
+            <article class="kpi-card">
+              <div class="kpi-head"><span>Cost Saved</span><i class="fa-solid fa-piggy-bank success-icon"></i></div>
+              <div class="kpi-value success-text" data-count="3240" data-prefix="$">$0</div>
+              <div class="kpi-foot positive"><i class="fa-solid fa-arrow-trend-up"></i> 20.6% optimization</div>
+              <div class="mini-bar"><i style="width:72%"></i></div>
+            </article>
+            <article class="kpi-card">
+              <div class="kpi-head"><span>Performance Score</span><i class="fa-solid fa-gauge-high"></i></div>
+              <div class="score-row"><div class="progress-ring" style="--progress:98.7"><span>98.7%</span></div><div><strong>SLA: 99.5%</strong><small>Excellent</small></div></div>
+            </article>
+            <article class="kpi-card">
+              <div class="kpi-head"><span>Auto Actions</span><i class="fa-solid fa-bolt"></i></div>
+              <div class="kpi-value" data-count="47">0</div>
+              <div class="kpi-foot positive"><i class="fa-solid fa-check"></i> 43 successful</div>
+              <div class="action-meter"><i style="width:91%"></i></div>
+            </article>
+            <article class="kpi-card">
+              <div class="kpi-head"><span>Resources Optimized</span><i class="fa-solid fa-server"></i></div>
+              <div class="kpi-value" data-count="86">0 <small>/ 128</small></div>
+              <div class="kpi-foot"><i class="fa-solid fa-circle-check"></i> 67.2% coverage</div>
+              <div class="mini-bar"><i style="width:67.2%"></i></div>
+            </article>
+          </div>
+
+          <div class="two-col chart-row">
+            <article class="panel chart-panel large">
+              <div class="panel-head">
+                <div><h3>Cost vs Performance</h3><p>Optimization impact across your infrastructure</p></div>
+                <div class="periods" id="periods"><button class="active" data-period="24H">24H</button><button data-period="7D">7D</button><button data-period="30D">30D</button><button data-period="90D">90D</button></div>
+              </div>
+              <div class="chart-wrap"><canvas id="costPerformanceChart"></canvas></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head"><div><h3>Cloud Cost Breakdown</h3><p>Current monthly allocation</p></div><button class="ghost-btn" data-section-jump="cost">Details</button></div>
+              <div class="donut-wrap"><canvas id="costBreakdownChart"></canvas><div class="donut-center"><strong>$12.48k</strong><span>Monthly</span></div></div>
+              <div class="legend-list">
+                <div><span><i class="legend-dot c1"></i>EC2</span><strong>39%</strong></div>
+                <div><span><i class="legend-dot c2"></i>EKS</span><strong>31%</strong></div>
+                <div><span><i class="legend-dot c3"></i>RDS</span><strong>19%</strong></div>
+                <div><span><i class="legend-dot c4"></i>S3</span><strong>7%</strong></div>
+                <div><span><i class="legend-dot c5"></i>Other</span><strong>4%</strong></div>
+              </div>
+            </article>
+          </div>
+
+          <section class="panel recommendations">
+            <div class="panel-head"><div><h3><i class="fa-solid fa-robot accent-icon"></i> AI Optimization Recommendations</h3><p>Actions identified by the autonomous optimization engine.</p></div><span class="opportunity-pill">18 opportunities</span></div>
+            <div class="recommendation-grid" id="recommendationGrid">
+              <article class="recommendation-card" data-id="rec-1">
+                <div class="rec-top"><span class="type-icon blue"><i class="fa-solid fa-server"></i></span><span class="severity">High impact</span></div>
+                <h4>Over-provisioned EC2 Instance</h4>
+                <code>EC2 / prod-api-server-04</code>
+                <div class="metrics"><div><span>CPU Utilization</span><strong>18%</strong></div><div><span>Memory</span><strong>32%</strong></div></div>
+                <div class="resize"><span>Current <strong>m5.2xlarge</strong></span><i class="fa-solid fa-arrow-right"></i><span>Recommended <strong>m5.xlarge</strong></span></div>
+                <div class="saving"><span>Potential Savings</span><strong>$420 / month</strong></div>
+                <div class="rec-actions"><button class="secondary-btn review-btn">Review</button><button class="primary-btn apply-btn">Apply Optimization</button></div>
+              </article>
+
+              <article class="recommendation-card" data-id="rec-2">
+                <div class="rec-top"><span class="type-icon purple"><i class="fa-solid fa-database"></i></span><span class="severity">Medium impact</span></div>
+                <h4>Idle RDS Instance</h4>
+                <code>RDS / analytics-db</code>
+                <div class="metrics"><div><span>Utilization</span><strong>7%</strong></div><div><span>Monthly Cost</span><strong>$540</strong></div></div>
+                <div class="resize"><span>Recommendation <strong>Schedule</strong></span><i class="fa-solid fa-clock"></i><span><strong>Off-hours</strong></span></div>
+                <div class="saving"><span>Potential Savings</span><strong>$185 / month</strong></div>
+                <div class="rec-actions"><button class="secondary-btn review-btn">Review</button><button class="primary-btn apply-btn">Apply</button></div>
+              </article>
+
+              <article class="recommendation-card" data-id="rec-3">
+                <div class="rec-top"><span class="type-icon cyan"><i class="fa-solid fa-bolt"></i></span><span class="severity">Safe action</span></div>
+                <h4>Spot Instance Opportunity</h4>
+                <code>EC2 / batch-workers</code>
+                <div class="metrics"><div><span>Current</span><strong>On-Demand</strong></div><div><span>Workload</span><strong>Interruptible</strong></div></div>
+                <div class="resize"><span>Recommended <strong>Spot</strong></span><i class="fa-solid fa-arrow-right"></i><span>Risk <strong>Low</strong></span></div>
+                <div class="saving"><span>Potential Savings</span><strong>$310 / month</strong></div>
+                <div class="rec-actions"><button class="secondary-btn review-btn">Review</button><button class="primary-btn apply-btn">Apply</button></div>
+              </article>
+            </div>
+          </section>
+
+          <div class="two-col">
+            <article class="panel forecast">
+              <div class="panel-head"><div><h3><i class="fa-solid fa-crystal-ball accent-icon"></i> AI Cost Forecast</h3><p>Projected spend based on workload patterns</p></div><span class="confidence">AI Confidence: <strong>94.2%</strong></span></div>
+              <div class="forecast-stats">
+                <div><span>Current monthly cost</span><strong>$12,480</strong></div>
+                <div><span>Predicted next month</span><strong>$13,840</strong></div>
+                <div class="with-opt"><span>With optimization</span><strong>$10,920</strong></div>
+                <div class="with-opt"><span>Potential additional savings</span><strong>$2,920</strong></div>
+              </div>
+              <div class="forecast-chart"><canvas id="forecastChart"></canvas></div>
+            </article>
+
+            <article class="panel drivers">
+              <div class="panel-head"><div><h3>Top Cost Drivers</h3><p>Largest contributors to monthly spend</p></div></div>
+              <div class="driver"><div class="driver-rank">01</div><div class="driver-copy"><strong>Production EKS Cluster</strong><span>Compute + control plane</span></div><strong>$3,860</strong></div>
+              <div class="driver"><div class="driver-rank">02</div><div class="driver-copy"><strong>EC2 Compute</strong><span>Application fleet</span></div><strong>$2,940</strong></div>
+              <div class="driver"><div class="driver-rank">03</div><div class="driver-copy"><strong>RDS Database</strong><span>Analytics + production</span></div><strong>$2,340</strong></div>
+              <div class="driver"><div class="driver-rank">04</div><div class="driver-copy"><strong>S3 Storage</strong><span>Object storage</span></div><strong>$840</strong></div>
+            </article>
+          </div>
+
+          <div class="two-col bottom-grid">
+            <article class="panel">
+              <div class="panel-head"><div><h3><i class="fa-solid fa-bolt accent-icon"></i> Autonomous Actions</h3><p>Latest actions taken by the optimizer</p></div><button class="ghost-btn" data-section-jump="actions">View All</button></div>
+              <div class="activity-list compact" id="activityPreview"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head"><div><h3><i class="fa-solid fa-triangle-exclamation accent-icon warning-icon"></i> Active Alerts</h3><p>Items requiring attention</p></div><button class="ghost-btn" data-section-jump="alerts">View All</button></div>
+              <div class="alert-list compact" id="alertPreview"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="dashboard-section" data-view="resources">
+          <div class="section-heading"><div><span class="eyebrow">INFRASTRUCTURE</span><h2>Cloud Resources</h2><p>Monitor health, utilization and optimization coverage across your estate.</p></div></div>
+          <div class="resource-toolbar panel">
+            <div class="search-box"><i class="fa-solid fa-magnifying-glass"></i><input id="resourceSearch" placeholder="Search resources..." /></div>
+            <select id="statusFilter"><option value="all">All statuses</option><option value="Healthy">Healthy</option><option value="Warning">Warning</option><option value="Critical">Critical</option></select>
+            <select id="resourceSort"><option value="name">Sort: Name</option><option value="cost">Sort: Cost</option><option value="cpu">Sort: CPU</option></select>
+          </div>
+          <div class="panel table-panel">
+            <div class="table-scroll"><table><thead><tr><th>Resource</th><th>Type</th><th>Status</th><th>CPU</th><th>Memory</th><th>Cost</th><th>Optimization</th></tr></thead><tbody id="resourceTable"></tbody></table></div>
+            <div class="pagination"><span id="resourceCount"></span><div><button class="page-btn active">1</button><button class="page-btn">2</button><button class="page-btn">3</button></div></div>
+          </div>
+        </section>
+
+        <section class="dashboard-section" data-view="cost">
+          <div class="section-heading"><div><span class="eyebrow">FINOPS</span><h2>Cost Analytics</h2><p>Understand where your cloud budget is going and where AI can reduce waste.</p></div></div>
+          <div class="kpi-grid mini-kpis">
+            <article class="kpi-card"><div class="kpi-head"><span>Monthly Spend</span><i class="fa-solid fa-wallet"></i></div><div class="kpi-value">$12,480</div><div class="kpi-foot negative">+2.4% MoM</div></article>
+            <article class="kpi-card"><div class="kpi-head"><span>Optimization Rate</span><i class="fa-solid fa-percent"></i></div><div class="kpi-value success-text">20.6%</div><div class="kpi-foot positive">↑ 4.8% this month</div></article>
+            <article class="kpi-card"><div class="kpi-head"><span>Waste Detected</span><i class="fa-solid fa-recycle"></i></div><div class="kpi-value">$1,890</div><div class="kpi-foot warning-text">18 opportunities</div></article>
+          </div>
+          <div class="two-col"><article class="panel large"><div class="panel-head"><div><h3>Spend Trend</h3><p>Actual vs optimized projection</p></div></div><div class="chart-wrap tall"><canvas id="costTrendChart"></canvas></div></article><article class="panel"><div class="panel-head"><div><h3>Cost Allocation</h3><p>Service-level breakdown</p></div></div><div class="donut-wrap"><canvas id="costBreakdownChart2"></canvas><div class="donut-center"><strong>100%</strong><span>Allocated</span></div></div></article></div>
+        </section>
+
+        <section class="dashboard-section" data-view="performance">
+          <div class="section-heading"><div><span class="eyebrow">OBSERVABILITY</span><h2>Performance</h2><p>Track reliability, latency and utilization with AI-driven health signals.</p></div></div>
+          <div class="performance-grid">
+            <article class="panel performance-score"><span class="eyebrow">GLOBAL SCORE</span><div class="big-score">98.7<span>%</span></div><div class="score-track"><i style="width:98.7%"></i></div><p>Infrastructure is operating within healthy performance boundaries.</p></article>
+            <article class="panel"><div class="panel-head"><div><h3>Latency</h3><p>p95 response time</p></div><span class="metric-good">−8.4%</span></div><div class="metric-number">118 <small>ms</small></div><div class="line-metric"><i style="width:82%"></i></div></article>
+            <article class="panel"><div class="panel-head"><div><h3>CPU Efficiency</h3><p>Across monitored compute</p></div><span class="metric-good">+5.1%</span></div><div class="metric-number">84.2 <small>%</small></div><div class="line-metric"><i style="width:84%"></i></div></article>
+            <article class="panel"><div class="panel-head"><div><h3>SLA Compliance</h3><p>Current service level</p></div><span class="metric-warning">99.5%</span></div><div class="metric-number">99.5 <small>%</small></div><div class="line-metric"><i style="width:99.5%"></i></div></article>
+          </div>
+          <article class="panel"><div class="panel-head"><div><h3>Performance Signals</h3><p>Last 24 hours</p></div></div><div class="chart-wrap tall"><canvas id="performanceChart"></canvas></div></article>
+        </section>
+
+        <section class="dashboard-section" data-view="optimizer">
+          <div class="section-heading"><div><span class="eyebrow">AI CONTROL PLANE</span><h2>AI Optimizer</h2><p>Autonomous decisioning for cost and performance optimization.</p></div><div class="mode-chip"><span class="live-dot"></span> Autonomous Mode</div></div>
+          <div class="optimizer-grid">
+            <article class="panel ai-control"><div class="ai-orb large-orb"><div class="orb-core"><i class="fa-solid fa-brain"></i></div></div><h3>Optimization Engine Online</h3><p>Analyzing 128 resources across cost, utilization, reliability and performance signals.</p><div class="ai-progress"><span>Analysis coverage</span><strong>96%</strong><div><i style="width:96%"></i></div></div><button class="primary-btn" id="runScan"><i class="fa-solid fa-rotate"></i> Run optimization scan</button></article>
+            <article class="panel"><div class="panel-head"><div><h3>Decision Pipeline</h3><p>How ACCPO evaluates opportunities</p></div></div><div class="pipeline"><div><span class="pipeline-icon"><i class="fa-solid fa-magnifying-glass-chart"></i></span><div><strong>Detect</strong><small>Identify anomalies & waste</small></div></div><div class="pipeline-line"></div><div><span class="pipeline-icon"><i class="fa-solid fa-brain"></i></span><div><strong>Predict</strong><small>Model cost/performance impact</small></div></div><div class="pipeline-line"></div><div><span class="pipeline-icon"><i class="fa-solid fa-code-branch"></i></span><div><strong>Decide</strong><small>Rank safe autonomous actions</small></div></div><div class="pipeline-line"></div><div><span class="pipeline-icon success-bg"><i class="fa-solid fa-check"></i></span><div><strong>Optimize</strong><small>Execute approved actions</small></div></div></div></article>
+          </div>
+        </section>
+
+        <section class="dashboard-section" data-view="actions">
+          <div class="section-heading"><div><span class="eyebrow">AUTOMATION</span><h2>Autonomous Actions</h2><p>A live record of actions executed or awaiting approval.</p></div></div>
+          <article class="panel"><div class="action-filters" id="actionFilters"><button class="active" data-filter="All">All</button><button data-filter="Successful">Successful</button><button data-filter="Pending">Pending</button><button data-filter="Failed">Failed</button></div><div class="activity-list" id="activityFull"></div></article>
+        </section>
+
+        <section class="dashboard-section" data-view="alerts">
+          <div class="section-heading"><div><span class="eyebrow">INCIDENTS</span><h2>Active Alerts</h2><p>Prioritized signals requiring review from your operations team.</p></div></div>
+          <article class="panel"><div class="alert-list" id="alertFull"></div></article>
+        </section>
+
+        <section class="dashboard-section" data-view="settings">
+          <div class="section-heading"><div><span class="eyebrow">CONTROL</span><h2>Settings</h2><p>optimizer behavior.</p></div></div>
+          <div class="settings-grid">
+            <article class="panel settings-card"><h3>Environment</h3><p>Choose which environment is represented by the dashboard.</p><select class="wide-select" id="settingsEnvironment"><option>Production</option><option>Staging</option><option>Development</option></select></article>
+            <article class="panel settings-card"><h3>Autonomous Actions</h3><p>Simulated policy controls for the live demo.</p><label class="switch-row"><span>Allow safe optimizations</span><input type="checkbox" checked><i></i></label><label class="switch-row"><span>Require approval for high-impact actions</span><input type="checkbox" checked><i></i></label></article>
+            <article class="panel settings-card"><h3>Notifications</h3><p>Manage demo notification behavior.</p><label class="switch-row"><span>Optimization alerts</span><input type="checkbox" checked><i></i></label><label class="switch-row"><span>Performance alerts</span><input type="checkbox" checked><i></i></label></article>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="modalBackdrop">
+    <div class="modal" id="modal"></div>
+  </div>
+  <div class="toast-container" id="toastContainer"></div>
+
+  <div class="search-overlay" id="searchOverlay">
+    <div class="global-search"><i class="fa-solid fa-magnifying-glass"></i><input id="globalSearch" placeholder="Search resources, recommendations, actions..." autofocus><button id="closeSearch"><i class="fa-solid fa-xmark"></i></button></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
