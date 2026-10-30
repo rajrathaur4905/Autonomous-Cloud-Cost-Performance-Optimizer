@@ -153,6 +153,11 @@ class ForecastAgent:
             yearly_seasonality=False,   # VM metrics rarely have yearly cycles
             changepoint_prior_scale=0.1,  # slightly more flexible trend
         )
+        # Prophet does not support timezone-aware datetimes — strip tz
+        if df["ds"].dt.tz is not None:
+            df = df.copy()
+            df["ds"] = df["ds"].dt.tz_localize(None)
+
         # Suppress Prophet's verbose stdout logging
         model.fit(df)
         return model
@@ -201,6 +206,9 @@ class ForecastAgent:
 
         # 1. Pull historical data from MonitorAgent
         history = self.monitor.get_metric_history(metric, hours=lookback)
+        # Strip timezone info — Prophet only works with tz-naive datetimes
+        if not history.empty and history["ds"].dt.tz is not None:
+            history["ds"] = history["ds"].dt.tz_localize(None)
         if history.empty or len(history) < 2:
             logger.warning(
                 "Insufficient data for '%s' (%d rows). "
@@ -278,6 +286,9 @@ class ForecastAgent:
 
         # Pull history
         history = self.monitor.get_metric_history(metric, hours=lookback)
+        # Strip timezone info — Prophet only works with tz-naive datetimes
+        if not history.empty and history["ds"].dt.tz is not None:
+            history["ds"] = history["ds"].dt.tz_localize(None)
         if history.empty or len(history) < 2:
             logger.warning("Insufficient data for anomaly detection.")
             return {
@@ -292,9 +303,8 @@ class ForecastAgent:
 
         # Fit and predict on the same historical range (in-sample)
         model = self._build_model(history)
-        predictions = model.predict(
-            history[["ds"]].copy()
-        )
+        history_ds = history[["ds"]].copy()
+        predictions = model.predict(history_ds)
 
         # Merge actuals with predictions
         merged = history.merge(
@@ -398,7 +408,8 @@ class ForecastAgent:
         forecast = result["forecast"]
 
         # Only look at *future* points (after the last historical timestamp)
-        now = datetime.now(timezone.utc)
+        # Use tz-naive now() to match Prophet's tz-naive output
+        now = datetime.utcnow()
         future_forecast = forecast[forecast["ds"] > now].copy()
 
         if future_forecast.empty:
@@ -432,7 +443,7 @@ class ForecastAgent:
         if will_breach:
             first_breach_time = breach_points["ds"].iloc[0]
             first_breach_at = first_breach_time.isoformat()
-            delta = first_breach_time - now
+            delta = first_breach_time - pd.Timestamp(now)
             hours, remainder = divmod(int(delta.total_seconds()), 3600)
             minutes = remainder // 60
             time_to_breach = f"{hours}h {minutes}m"
@@ -570,7 +581,7 @@ class ForecastAgent:
 
         history = result["history"]
         forecast = result["forecast"]
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
 
         # ---- Build the chart ----
         fig, ax = plt.subplots(figsize=(14, 5))
@@ -776,8 +787,55 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Initialise agents
-    monitor = MonitorAgent()
+    # Initialise agents — use a lightweight wrapper when Azure creds
+    # are unavailable (e.g. testing with synthetic data)
+    try:
+        monitor = MonitorAgent()
+    except (ValueError, Exception) as exc:
+        logger.warning(
+            "MonitorAgent init failed (%s). "
+            "Falling back to direct DB reader for local/synthetic testing.",
+            exc,
+        )
+
+        # Build a minimal stand-in that reads directly from SQLite
+        class _LocalMonitor:
+            """Lightweight MonitorAgent substitute for offline testing."""
+
+            def __init__(self, db_path: str) -> None:
+                self.db_path = db_path
+
+            def get_metric_history(self, metric: str, hours: int = 24):
+                import sqlite3 as _sql
+                if metric not in METRIC_MAP:
+                    raise ValueError(f"Unknown metric '{metric}'.")
+                cutoff = (
+                    datetime.utcnow() - timedelta(hours=hours)
+                ).isoformat()
+                with _sql.connect(self.db_path) as conn:
+                    df = pd.read_sql_query(
+                        f"SELECT timestamp AS ds, {metric} AS y "
+                        f"FROM vm_metrics "
+                        f"WHERE timestamp >= ? AND {metric} IS NOT NULL "
+                        f"ORDER BY timestamp ASC",
+                        conn,
+                        params=(cutoff,),
+                    )
+                if not df.empty:
+                    df["ds"] = pd.to_datetime(df["ds"])
+                return df
+
+            def get_latest_metrics(self, limit: int = 100):
+                import sqlite3 as _sql
+                with _sql.connect(self.db_path) as conn:
+                    return pd.read_sql_query(
+                        "SELECT * FROM vm_metrics ORDER BY timestamp DESC LIMIT ?",
+                        conn,
+                        params=(limit,),
+                    )
+
+        monitor = _LocalMonitor(DB_PATH)
+
     forecaster = ForecastAgent(monitor, lookback_hours=args.lookback)
 
     if args.summary:
