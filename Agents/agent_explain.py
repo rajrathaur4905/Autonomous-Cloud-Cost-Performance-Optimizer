@@ -9,7 +9,7 @@ Capabilities
 ------------
 - **Context Assembly**: Aggregates decision reasons, forecast bounds, and deployment results.
 - **Prompt Engineering**: Structures context into a prompt for accurate LLM generation.
-- **LLM Integration**: Calls OpenAI (or works offline if no key is provided).
+- **LLM Integration**: Calls Google Gemini API (or works offline if no key is provided).
 - **Audit Logging**: Tracks explanations and LLM token costs in SQLite.
 
 Downstream consumers
@@ -32,7 +32,12 @@ import json
 from datetime import datetime, timezone
 
 import pandas as pd
-from openai import OpenAI
+import requests
+
+try:
+    from google import genai
+except ImportError:
+    genai = None
 
 # ---------------------------------------------------------------------------
 # Resolve project root so `config.settings` is always importable
@@ -41,7 +46,7 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from config.settings import DB_PATH, OPENAI_API_KEY, LLM_MODEL
+from config.settings import DB_PATH, GEMINI_API_KEY, LLM_MODEL
 from Agents.agent_optimize import VM_SIZE_CATALOG
 
 # ---------------------------------------------------------------------------
@@ -84,17 +89,19 @@ class ExplainAgent:
         model: str | None = None,
     ):
         self.db_path = db_path or DB_PATH
-        self.api_key = api_key or OPENAI_API_KEY
+        self.api_key = api_key or GEMINI_API_KEY
         self.model = model or LLM_MODEL
         
-        if not self.api_key:
+        if not self.api_key or "paste-your" in self.api_key:
             logger.warning(
-                "OPENAI_API_KEY not set. ExplainAgent will work in offline mode "
+                "GEMINI_API_KEY not set or contains placeholder. ExplainAgent will work in offline mode "
                 "(context assembly only, no LLM calls)."
             )
             self.client = None
+        elif genai is not None:
+            self.client = genai.Client(api_key=self.api_key)
         else:
-            self.client = OpenAI(api_key=self.api_key)
+            self.client = "requests"
             
         self._init_db()
         logger.info("ExplainAgent initialised (model='%s', offline=%s)", self.model, self.client is None)
@@ -265,24 +272,74 @@ Write a clear, professional explanation in 3-4 sentences that:
         if self.client is None:
             logger.info("Offline mode active. Generating fallback explanation.")
             narrative = f"[OFFLINE MODE — LLM not called]\n\nPrompt that would be sent:\n{user_prompt}"
-        else:
-            logger.info("Calling OpenAI API (%s)...", self.model)
+        elif self.client == "requests":
+            logger.info("Calling Google Gemini API (%s) via REST...", self.model)
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=LLM_TEMPERATURE,
-                    max_tokens=LLM_MAX_TOKENS,
-                )
-                narrative = response.choices[0].message.content.strip()
-                prompt_tokens = response.usage.prompt_tokens
-                completion_tokens = response.usage.completion_tokens
-                logger.info("Successfully generated explanation.")
+                full_prompt = f"{DEFAULT_SYSTEM_PROMPT}\n\n{user_prompt}"
+                models_to_try = [self.model]
+                for fb in ["gemini-flash-lite-latest", "gemini-3-flash-preview"]:
+                    if fb not in models_to_try:
+                        models_to_try.append(fb)
+                
+                success = False
+                for m in models_to_try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent"
+                    headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
+                    payload = {
+                        "contents": [{"parts": [{"text": full_prompt}]}],
+                        "generationConfig": {
+                            "temperature": LLM_TEMPERATURE,
+                            "maxOutputTokens": LLM_MAX_TOKENS,
+                        }
+                    }
+                    resp = requests.post(url, headers=headers, json=payload, timeout=30)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            if parts:
+                                narrative = parts[0].get("text", "").strip()
+                        usage = data.get("usageMetadata", {})
+                        prompt_tokens = usage.get("promptTokenCount", 0)
+                        completion_tokens = usage.get("candidatesTokenCount", 0)
+                        self.model = m
+                        logger.info("Successfully generated explanation via Gemini REST using model '%s'.", m)
+                        success = True
+                        break
+                    else:
+                        logger.warning("Gemini model '%s' returned status %d. Trying next...", m, resp.status_code)
+
+                if not success:
+                    logger.error("All Gemini models failed. Last error: %s", resp.text)
+                    narrative = f"[LLM ERROR] Gemini API returned HTTP {resp.status_code}: {resp.text}"
             except Exception as e:
-                logger.error("Failed to generate explanation from OpenAI: %s", e)
+                logger.error("Failed to generate explanation from Gemini REST: %s", e)
+                narrative = f"[LLM ERROR] Unable to generate explanation: {e}"
+        else:
+            logger.info("Calling Google Gemini API (%s)...", self.model)
+            try:
+                # Combine system prompt and user prompt for Gemini
+                full_prompt = f"{DEFAULT_SYSTEM_PROMPT}\n\n{user_prompt}"
+                
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents=full_prompt,
+                    config=genai.types.GenerateContentConfig(
+                        temperature=LLM_TEMPERATURE,
+                        max_output_tokens=LLM_MAX_TOKENS,
+                    ),
+                )
+                narrative = response.text.strip()
+                
+                # Extract token usage from Gemini response metadata
+                if response.usage_metadata:
+                    prompt_tokens = response.usage_metadata.prompt_token_count or 0
+                    completion_tokens = response.usage_metadata.candidates_token_count or 0
+                
+                logger.info("Successfully generated explanation via Gemini.")
+            except Exception as e:
+                logger.error("Failed to generate explanation from Gemini: %s", e)
                 narrative = f"[LLM ERROR] Unable to generate explanation: {e}"
 
         # 4. Generate summary one-liner
@@ -291,9 +348,9 @@ Write a clear, professional explanation in 3-4 sentences that:
         target = context.get('recommended_size', 'N/A')
         summary = f"{action_str}: {context['current_size']} → {target} | Savings: {savings_str}/mo"
         
-        # 5. Calculate cost (Approximate based on gpt-4o-mini pricing)
-        input_cost = (prompt_tokens / 1_000_000) * 0.15
-        output_cost = (completion_tokens / 1_000_000) * 0.60
+        # 5. Calculate cost (Gemini Flash pricing: ~$0.075/1M input, ~$0.30/1M output)
+        input_cost = (prompt_tokens / 1_000_000) * 0.075
+        output_cost = (completion_tokens / 1_000_000) * 0.30
         llm_cost = input_cost + output_cost
 
         # 6. Package and log

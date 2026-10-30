@@ -166,6 +166,9 @@ class OptimizeAgent:
                 
             last_action_time = datetime.fromisoformat(row[0])
             now = datetime.now(timezone.utc)
+            # Ensure both are tz-aware for comparison
+            if last_action_time.tzinfo is None:
+                last_action_time = last_action_time.replace(tzinfo=timezone.utc)
             return (now - last_action_time) < timedelta(minutes=COOLDOWN_MINUTES)
 
     def _select_target_size(self, direction: str) -> str | None:
@@ -226,7 +229,7 @@ class OptimizeAgent:
         result = self.forecaster.get_forecast(metric, horizon_hours=horizon_hours)
         forecast_df = result.get("forecast", pd.DataFrame())
         
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()  # tz-naive to match Prophet's output
         
         base_decision = {
             "timestamp": now.isoformat(),
