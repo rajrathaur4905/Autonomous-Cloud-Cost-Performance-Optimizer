@@ -1,11 +1,12 @@
-# ☁️ Autonomous Cloud Cost & Performance Optimizer
+# ☁️ Autonomous Cloud Cost & Performance Optimizer (`OptiCloud.ai`)
 
-> A multi-agent AI system that **monitors**, **forecasts**, **optimizes**, **deploys**, and **explains** cloud resource decisions — fully autonomously — on Microsoft Azure.
+> A multi-agent AI system that **monitors**, **forecasts**, **optimizes**, **deploys**, and **explains** cloud resource decisions — autonomously — on Microsoft Azure, with full offline synthetic-data simulation and an interactive Dash dashboard.
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Azure](https://img.shields.io/badge/Azure-Cloud-0078D4?logo=microsoftazure&logoColor=white)](https://azure.microsoft.com/)
 [![Prophet](https://img.shields.io/badge/Prophet-Time--Series-1877F2?logo=meta&logoColor=white)](https://facebook.github.io/prophet/)
-[![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4o--mini-412991?logo=openai&logoColor=white)](https://openai.com/)
+[![Gemini](https://img.shields.io/badge/Google%20Gemini-Explainability-4285F4?logo=googlegemini&logoColor=white)](https://ai.google.dev/)
+[![Dash](https://img.shields.io/badge/Plotly%20Dash-Dashboard-008DE4?logo=plotly&logoColor=white)](https://dash.plotly.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
@@ -15,13 +16,15 @@
 - [Overview](#overview)
 - [Key Features](#key-features)
 - [System Architecture](#system-architecture)
-- [Agent Pipeline](#agent-pipeline)
+- [Agent Pipeline & State Machines](#agent-pipeline--state-machines)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
+- [Dashboard](#dashboard)
 - [Synthetic Data Generator](#synthetic-data-generator)
+- [Testing](#testing)
 - [Tech Stack](#tech-stack)
 - [Contributing](#contributing)
 - [License](#license)
@@ -32,29 +35,28 @@
 
 Cloud cost optimization remains one of the most challenging problems in modern infrastructure management. Resources are often over-provisioned "just in case", leading to significant waste, or under-provisioned, leading to performance degradation and SLA breaches.
 
-**Autonomous Cloud Cost & Performance Optimizer** solves this by deploying a pipeline of five AI-powered agents that work in concert to:
+**Autonomous Cloud Cost & Performance Optimizer (`OptiCloud.ai`)** solves this with a closed-loop pipeline of five specialized agents coordinated by `config/app.py` and backed by explicit state machines in `Agents/state_machines.py`:
 
-1. **Continuously monitor** VM-level metrics from Azure Monitor
-2. **Forecast** future resource utilization using time-series models
-3. **Decide** optimal scaling actions via rule-based heuristics with safety guards
-4. **Execute** (or simulate) infrastructure changes through Azure SDK
-5. **Explain** every autonomous decision in plain English using an LLM
-
-The result is a closed-loop system that balances **cost savings** with **performance guarantees** — and keeps humans in the loop through explainable AI.
+1. **Monitor** VM-level metrics from Azure Monitor (or fall back to local SQLite via `LocalMonitor`)
+2. **Forecast** future resource utilization and threshold breaches using Facebook Prophet
+3. **Optimize** VM sizing via rule-based heuristics, risk scoring, tier bounds, and a cooldown state machine
+4. **Deploy** (or dry-run simulate) VM resizes via Azure Compute SDK with validated lifecycle transitions, retries, and rollback support
+5. **Explain** every decision in plain English using Google Gemini (with automatic REST/SDK fallback and offline mode)
 
 ---
 
 ## Key Features
 
-| Feature                        | Description                                                                                             |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| 🔍 **Real-Time Monitoring**     | Collects CPU, memory, disk I/O, and network metrics from Azure Monitor at configurable intervals        |
-| 📈 **Time-Series Forecasting**  | Uses Facebook Prophet to predict metric trends, detect anomalies, and forecast threshold breaches       |
-| ⚙️ **Rule-Based Optimization**  | Evaluates upsize/downsize/hold decisions with risk scoring, cost estimation, and cooldown safety guards |
-| 🚀 **Automated Deployment**     | Executes VM resizing via Azure Compute SDK with pre-flight validation and dry-run support               |
-| 💬 **LLM-Powered Explanations** | Generates natural-language narratives for every decision using OpenAI GPT-4o-mini                       |
-| 🧪 **Synthetic Data Generator** | Produces realistic VM metric data with daily cycles, weekend patterns, and random spikes for testing    |
-| 🛡️ **Safety-First Design**      | Cooldowns, confidence thresholds, and dry-run modes prevent reckless infrastructure changes             |
+| Feature                        | Description                                                                                                       |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| 🔍 **Hybrid Monitoring**       | Collects CPU, memory, disk I/O, and network metrics from Azure Monitor or reads local `metrics.db` offline        |
+| 📈 **Time-Series Forecasting** | Uses Facebook Prophet to predict metric trends, detect anomalies, and flag predicted threshold breaches           |
+| ⚙️ **Rule-Based Optimization** | Evaluates `upsize` / `downsize` / `hold` decisions across Azure B-series tiers with risk scoring and cost savings |
+| 🔄 **Explicit State Machines** | Centralizes validated transitions (`DeploymentStateMachine`, `VMTierStateMachine`, `CooldownState`, etc.)        |
+| 🚀 **Safe Deployment & Rollback** | Executes VM resizing via Azure Compute SDK with pre-flight checks, retries, dry-run mode, and rollback support |
+| 💬 **Gemini Explanations**     | Generates FinOps audit narratives via Google Gemini (SDK or REST API with model fallback) or offline templates    |
+| 📊 **Plotly Dash Dashboard**   | Multi-page dark glassmorphism web UI (`/overview`, `/metrics`, `/forecasts`, `/decisions`) with live pipeline run  |
+| 🧪 **Synthetic Data Generator**| Produces realistic VM metric data with daily cycles, weekend patterns, and random spikes for offline testing      |
 
 ---
 
@@ -68,7 +70,7 @@ The result is a closed-loop system that balances **cost savings** with **perform
 │  │  (Target)    │───▶│    (Metrics)  │    │   (Resize Actions)   │   │
 │  └─────────────┘    └──────┬───────┘    └──────────▲───────────┘   │
 └──────────────────────────────┼──────────────────────┼───────────────┘
-                               │                      │
+                               │ (or LocalMonitor offline fallback)
                    ┌───────────▼───────────┐          │
                    │  Agent 1: MONITOR     │          │
                    │  (Collect & Store)    │          │
@@ -86,28 +88,35 @@ The result is a closed-loop system that balances **cost savings** with **perform
                                │                      │
                    ┌───────────▼───────────┐          │
                    │  Agent 4: DEPLOY      │──────────┘
-                   │  (Execute/Dry-Run)    │
+                   │  (Execute/Dry-Run/RB) │
                    └───────────┬───────────┘
                                │
                    ┌───────────▼───────────┐
                    │  Agent 5: EXPLAIN     │
-                   │  (LLM Narratives)     │
+                   │  (Gemini Narratives)  │
                    └───────────┬───────────┘
                                │
+             ┌─────────────────▼─────────────────┐
+             │  SQLite Database (data/metrics.db) │
+             │  vm_metrics · optimization_decisions│
+             │  deployment_logs · explanations    │
+             └─────────────────┬─────────────────┘
+                               │
                    ┌───────────▼───────────┐
-                   │     SQLite Database    │
-                   │  (metrics.db — single  │
-                   │   source of truth)     │
+                   │  Plotly Dash UI       │
+                   │  (http://localhost:8050)│
                    └───────────────────────┘
 ```
 
 ---
 
-## Agent Pipeline
+## Agent Pipeline & State Machines
 
-### Agent 1 — Monitor Agent (`agent_monitor.py`)
+All agent, orchestrator, and UI states are defined in [`Agents/state_machines.py`](Agents/state_machines.py):
 
-Collects real-time and historical performance metrics from **Azure Monitor** for a target Virtual Machine and persists them into a local SQLite database.
+### Agent 1 — Monitor Agent (`Agents/agent_monitor.py`)
+
+Collects real-time performance metrics from **Azure Monitor** into `vm_metrics`, or switches to `LocalMonitor` (`DataSourceMode.LOCAL_SQLITE`) when Azure credentials are absent or contain template placeholders. Shares `build_azure_credential()` (`AuthMode.SERVICE_PRINCIPAL` vs `AuthMode.DEFAULT_CREDENTIAL`).
 
 **Metrics collected:**
 | Metric                   | Azure Name                  |
@@ -119,89 +128,31 @@ Collects real-time and historical performance metrics from **Azure Monitor** for
 | Network In (bytes)       | `Network In Total`          |
 | Network Out (bytes)      | `Network Out Total`         |
 
-```python
-from Agents.agent_monitor import MonitorAgent
+### Agent 2 — Forecast Agent (`Agents/agent_forecast.py`)
 
-agent = MonitorAgent()
-agent.collect_metrics()            # Fetch metrics for the last hour
-df = agent.get_latest_metrics()    # Pandas DataFrame for downstream agents
-```
+Uses **Facebook Prophet** to forecast metric curves, detect anomalies outside the 95% uncertainty interval, and check threshold breaches (`ForecastStatus`: `ok`, `insufficient_data`, `no_future_points`, `breach_predicted`, `error`).
 
----
+### Agent 3 — Optimize Agent (`Agents/agent_optimize.py`)
 
-### Agent 2 — Forecast Agent (`agent_forecast.py`)
+Evaluates scaling actions (`ScalingAction`: `upsize`, `downsize`, `hold`) over `VMTierStateMachine` (`Standard_B1s` → `Standard_B1ms` → `Standard_B2s` → `Standard_B2ms` → `Standard_B4ms`):
+- **Cooldown guard (`CooldownState`):** 60-minute latch ignoring `rejected`, `failed`, and `skipped` entries and scoped per `dry_run` mode
+- **Risk assessment (`RiskLevel`):** `LOW`, `MEDIUM`, or `HIGH` based on forecast uncertainty band width
+- **Savings estimator:** Monthly INR (₹) cost delta from `VM_SIZE_CATALOG`
 
-Uses **Facebook Prophet** to perform time-series forecasting on historical VM metrics. Capable of forecasting future values, detecting anomalies, and predicting threshold breaches.
+### Agent 4 — Deploy Agent (`Agents/agent_deploy.py`)
 
-**Capabilities:**
-- 📊 Forecast future metric values for a configurable horizon
-- 🚨 Anomaly detection via Prophet's uncertainty intervals
-- ⚠️ Threshold breach prediction within the forecast window
-- 📉 Visualization — generates and saves forecast charts to `data/`
+Executes or dry-runs decisions using `DeploymentStateMachine` and synchronizes `optimization_decisions.status` in SQLite:
+- `hold` actions transition `pending -> skipped` (recorded neutrally, not as failures)
+- Pre-flight validation failures transition `pending -> rejected`
+- Valid resizes transition `pending -> approved -> executing -> dry_run | completed | failed` (with `MAX_RETRIES = 3` retry backoff for live Azure Compute SDK calls)
+- `rollback_deployment(deployment_id)` transitions `completed | dry_run | failed -> rolled_back` using `previous_size`
+- `DeployAgent.get_effective_vm_size()` recovers the active VM tier across pipeline runs
 
-```python
-from Agents.agent_forecast import ForecastAgent
+### Agent 5 — Explain Agent (`Agents/agent_explain.py`)
 
-forecast = ForecastAgent(monitor)
-result     = forecast.get_forecast("cpu_percent", horizon_hours=6)
-anomalies  = forecast.detect_anomalies("cpu_percent", lookback_hours=24)
-breach     = forecast.check_threshold_breach("cpu_percent", threshold=90, horizon_hours=4)
-```
-
----
-
-### Agent 3 — Optimize Agent (`agent_optimize.py`)
-
-Applies **rule-based heuristics** on top of forecast data to determine whether a cloud resource should be **upsized**, **downsized**, or **held** at its current size.
-
-**Key features:**
-- Risk evaluation using forecast upper/lower bounds
-- Monthly cost savings estimation for downsize recommendations
-- Cooldown timers and confidence thresholds to prevent scaling thrash
-
-```python
-from Agents.agent_optimize import OptimizeAgent
-
-optimizer = OptimizeAgent(monitor, forecaster, current_vm_size="Standard_B2s")
-decision  = optimizer.evaluate(metric="cpu_percent", horizon_hours=4)
-```
-
----
-
-### Agent 4 — Deploy Agent (`agent_deploy.py`)
-
-Executes or simulates the optimization decisions made by Agent 3. Includes **pre-flight validation**, **dry-run** capabilities, and full **audit logging**.
-
-**Safety features:**
-- Pre-flight checks ensure decision validity before execution
-- Dry-run mode simulates actions without calling Azure APIs
-- All deployment results are recorded in SQLite for auditing
-
-```python
-from Agents.agent_deploy import DeployAgent
-
-agent  = DeployAgent(dry_run=True)
-result = agent.execute_decision(decision)
-```
-
----
-
-### Agent 5 — Explain Agent (`agent_explain.py`)
-
-Generates human-readable, **LLM-powered narratives** for every autonomous decision. Aggregates context from optimization decisions and deployment logs to provide clear, data-driven explanations.
-
-**How it works:**
-1. Assembles context — decision reasons, forecast bounds, deployment results
-2. Structures a prompt for accurate LLM generation
-3. Calls **OpenAI GPT-4o-mini** (or falls back to offline mode)
-4. Logs explanations and token costs in SQLite
-
-```python
-from Agents.agent_explain import ExplainAgent
-
-agent  = ExplainAgent()
-result = agent.explain_latest_decision()
-```
+Assembles decision, forecast, and deployment context and selects `LLMTransportMode`:
+- `offline`: Generates structured fallback output when `GEMINI_API_KEY` is missing or a placeholder
+- `genai_sdk` / `rest_api`: Calls **Google Gemini** (`LLM_MODEL`, falling back across `gemini-flash-lite-latest` and `gemini-3-flash-preview`) and logs token usage and USD cost to `explanations`
 
 ---
 
@@ -210,27 +161,36 @@ result = agent.explain_latest_decision()
 ```
 Autonomous-Cloud-Cost-Performance-Optimizer/
 │
-├── Agents/                         # Core agent modules
+├── Agents/                         # Core agents & state machines
 │   ├── __init__.py
-│   ├── agent_monitor.py            # Agent 1 — Metric collection
-│   ├── agent_forecast.py           # Agent 2 — Time-series forecasting
-│   ├── agent_optimize.py           # Agent 3 — Decision engine
-│   ├── agent_deploy.py             # Agent 4 — Deployment executor
-│   └── agent_explain.py            # Agent 5 — LLM explainability
+│   ├── state_machines.py           # Centralized enums & validated state machines
+│   ├── agent_monitor.py            # Agent 1 — Azure Monitor & LocalMonitor
+│   ├── agent_forecast.py           # Agent 2 — Prophet forecasting & anomaly detection
+│   ├── agent_optimize.py           # Agent 3 — Optimization engine & cooldown latch
+│   ├── agent_deploy.py             # Agent 4 — Execution, retries, dry-run & rollback
+│   └── agent_explain.py            # Agent 5 — Google Gemini audit explanations
 │
 ├── config/
-│   ├── settings.py                 # Central configuration (env loader)
-│   └── app.py                      # Application orchestrator
+│   ├── settings.py                 # Central configuration (.env loader)
+│   └── app.py                      # 5-agent pipeline orchestrator (run_pipeline)
 │
-├── dashboard/                      # Streamlit dashboard (Phase 5)
+├── dashboard/                      # Plotly Dash web application
+│   ├── app.py                      # Dash server, routing & callbacks (port 8050)
+│   ├── pages.py                    # Overview, Metrics, Forecasts & Decisions layouts
+│   ├── db.py                       # SQLite query & KPI aggregation helpers
+│   ├── assets/                     # Glassmorphism CSS theme & SVG logo
+│   └── README.md                   # Dashboard documentation
 │
 ├── data/
-│   ├── generate_synthetic_data.py  # Synthetic metric data generator
+│   ├── generate_synthetic_data.py  # Synthetic metric generator
 │   ├── metrics.db                  # SQLite database (auto-generated)
-│   └── forecast_*.png              # Forecast visualizations
+│   └── forecast_*.png              # Saved forecast plots
 │
-├── tests/                          # Unit & integration tests
+├── tests/
+│   └── test_state_machines.py      # Unit & integration tests for state machines
 │
+├── app.py                          # CLI end-to-end pipeline walkthrough
+├── demo_presentation.py            # Presentation demo script
 ├── .env                            # Environment variables (not committed)
 ├── .gitignore
 ├── requirements.txt
@@ -242,9 +202,9 @@ Autonomous-Cloud-Cost-Performance-Optimizer/
 ## Prerequisites
 
 - **Python** 3.10 or higher
-- **Azure Subscription** with a deployed Virtual Machine (or use synthetic data for testing)
-- **Azure Service Principal** with `Monitoring Reader` + `Virtual Machine Contributor` roles
-- **OpenAI API Key** (for Agent 5 — optional, falls back to offline mode)
+- **Azure Subscription** with a target VM *(optional — runs locally with synthetic data)*
+- **Azure Service Principal** with `Monitoring Reader` + `Virtual Machine Contributor` roles *(optional)*
+- **Google Gemini API Key** *(optional — Agent 5 runs in offline fallback mode without it)*
 
 ---
 
@@ -260,9 +220,9 @@ cd Autonomous-Cloud-Cost-Performance-Optimizer
 ### 2. Create and activate a virtual environment
 
 ```bash
-# Windows
+# Windows (PowerShell)
 python -m venv venv
-venv\Scripts\activate
+.\venv\Scripts\Activate.ps1
 
 # macOS / Linux
 python3 -m venv venv
@@ -279,114 +239,121 @@ pip install -r requirements.txt
 
 ## Configuration
 
-### Environment Variables
-
-Create a `.env` file in the project root (a template is already provided):
+Create a `.env` file in `Autonomous-Cloud-Cost-Performance-Optimizer/`:
 
 ```env
-# Azure Credentials
-AZURE_SUBSCRIPTION_ID=your-subscription-id
-AZURE_TENANT_ID=your-tenant-id
-AZURE_CLIENT_ID=your-client-id
-AZURE_CLIENT_SECRET=your-client-secret
+# Azure Credentials (leave as placeholders or omit for local offline mode)
+AZURE_SUBSCRIPTION_ID=your-subscription-id-here
+AZURE_TENANT_ID=your-tenant-id-here
+AZURE_CLIENT_ID=your-client-id-here
+AZURE_CLIENT_SECRET=your-client-secret-here
 
 # Azure VM Resource ID
 AZURE_VM_RESOURCE_ID=/subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.Compute/virtualMachines/<vm-name>
 
-# OpenAI API Key (optional — Agent 5 works offline without it)
-OPENAI_API_KEY=sk-...
+# Google Gemini API Key (optional — Agent 5 falls back to offline mode if unset)
+GEMINI_API_KEY=your-gemini-api-key-here
 
-# LLM Model (default: gpt-4o-mini)
-LLM_MODEL=gpt-4o-mini
+# Gemini Model (default: gemini-flash-lite-latest)
+LLM_MODEL=gemini-flash-lite-latest
 ```
 
-> ⚠️ **Important**: The `.env` file is listed in `.gitignore` and must **never** be committed to version control.
+> ⚠️ **Important**: `.env` is ignored by `.gitignore` and must never be committed with real credentials.
 
 ---
 
 ## Usage
 
-### Quick Start with Synthetic Data (No Azure Required)
-
-Generate realistic test data to run the full pipeline locally:
+### 1. Generate Synthetic Data (Offline Quick Start)
 
 ```bash
-python data/generate_synthetic_data.py
+python data/generate_synthetic_data.py --days 5 --replace --summary
 ```
 
-### Running Individual Agents
+### 2. Run the Full 5-Agent Pipeline
+
+Run the orchestrator (returns structured JSON, automatically choosing Azure Live or `LocalMonitor` and persisting VM tier state):
+
+```bash
+python config/app.py
+```
+
+Or run the formatted CLI walkthrough:
+
+```bash
+python app.py
+```
+
+### 3. Programmatic Usage
 
 ```python
-from Agents.agent_monitor  import MonitorAgent
-from Agents.agent_forecast import ForecastAgent
-from Agents.agent_optimize import OptimizeAgent
-from Agents.agent_deploy   import DeployAgent
-from Agents.agent_explain  import ExplainAgent
+from config.app import run_pipeline
 
-# 1. Monitor — collect metrics
-monitor = MonitorAgent()
-monitor.collect_metrics()
-
-# 2. Forecast — predict future trends
-forecaster = ForecastAgent(monitor)
-forecast   = forecaster.get_forecast("cpu_percent", horizon_hours=6)
-
-# 3. Optimize — decide scaling action
-optimizer = OptimizeAgent(monitor, forecaster, current_vm_size="Standard_B2s")
-decision  = optimizer.evaluate(metric="cpu_percent", horizon_hours=4)
-
-# 4. Deploy — execute (or dry-run) the decision
-deployer = DeployAgent(dry_run=True)
-result   = deployer.execute_decision(decision)
-
-# 5. Explain — generate human-readable narrative
-explainer   = ExplainAgent()
-explanation = explainer.explain_latest_decision()
+result = run_pipeline(
+    metric="cpu_percent",
+    horizon_hours=4,
+    lookback_hours=24,
+    dry_run=True,
+)
+print(result["decision"]["action"], result["deployment"]["status"])
 ```
 
 ---
 
-## Synthetic Data Generator
+## Dashboard
 
-The generator creates realistic VM metric patterns for offline testing:
+Launch the interactive **Plotly Dash** web UI:
+
+```bash
+python dashboard/app.py
+```
+
+Then open **http://localhost:8050** in your browser. See [`dashboard/README.md`](dashboard/README.md) for full details on pages, callbacks, and UI state indicators.
+
+---
+
+## Synthetic Data Generator
 
 | Pattern      | Description                                                                                                     |
 | ------------ | --------------------------------------------------------------------------------------------------------------- |
 | **CPU**      | Daily sine-wave cycle peaking at 10 AM & 3 PM IST. Weekdays are ~30% busier. Random spikes simulate batch jobs. |
 | **Memory**   | Inversely correlated with CPU — high load consumes more RAM. Base: 1 GB (B1s instance).                         |
 | **Disk I/O** | Bursty read/write operations loosely following CPU patterns with added noise.                                   |
-| **Network**  | Correlated with CPU; weekday mornings see upload spikes simulating backup jobs.                                 |
+| **Network**  | Correlated with CPU; weekday mornings (6–8 AM IST) see upload spikes simulating backup jobs.                    |
 
 ```bash
-# Default: 5 days of data at 5-minute intervals
-python data/generate_synthetic_data.py
-
-# Custom: 7 days at 1-minute intervals, replacing existing data
+python data/generate_synthetic_data.py                          # 5 days, 5-min intervals
 python data/generate_synthetic_data.py --days 7 --interval 1 --replace
+python data/generate_synthetic_data.py --summary-only
+```
 
-# Quick check: 1 day with summary output
-python data/generate_synthetic_data.py --days 1 --summary
+---
+
+## Testing
+
+Run the state-machine and pipeline test suite:
+
+```bash
+python -m unittest discover -s tests -v
 ```
 
 ---
 
 ## Tech Stack
 
-| Layer                | Technology                                        |
-| -------------------- | ------------------------------------------------- |
-| **Language**         | Python 3.10+                                      |
-| **Cloud Provider**   | Microsoft Azure (Monitor, Compute, Identity SDKs) |
-| **ML / Forecasting** | Facebook Prophet, Pandas, NumPy, Matplotlib       |
-| **LLM**              | OpenAI GPT-4o-mini (via `openai` SDK)             |
-| **Database**         | SQLite (zero-config, embedded)                    |
-| **Config**           | python-dotenv, environment variables              |
-| **Dashboard**        | Streamlit *(planned — Phase 5)*                   |
+| Layer                | Technology                                                     |
+| -------------------- | -------------------------------------------------------------- |
+| **Language**         | Python 3.10+                                                   |
+| **Cloud Provider**   | Microsoft Azure (`azure-mgmt-monitor`, `azure-mgmt-compute`, `azure-identity`) |
+| **ML / Forecasting** | Facebook Prophet (`prophet`), `pandas`, `numpy`, `matplotlib`  |
+| **LLM**              | Google Gemini (`gemini-flash-lite-latest` via REST / `google-genai`) |
+| **Database**         | SQLite (`data/metrics.db`)                                     |
+| **Dashboard**        | Plotly Dash (`dash`, `plotly`, `Flask`)                        |
+| **Config**           | `python-dotenv`                                                |
 
 ---
 
 ## Contributing
-
-Contributions are welcome! Please follow these steps:
 
 1. **Fork** the repository
 2. **Create** a feature branch (`git checkout -b feature/your-feature`)
@@ -399,5 +366,3 @@ Contributions are welcome! Please follow these steps:
 ## License
 
 This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
-
----
