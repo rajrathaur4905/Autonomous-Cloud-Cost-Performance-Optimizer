@@ -56,6 +56,11 @@ from config.settings import (
     AZURE_VM_RESOURCE_ID,
     DB_PATH,
 )
+from Agents.state_machines import (
+    AuthMode,
+    DataSourceMode,
+    is_placeholder_value,
+)
 
 # ---------------------------------------------------------------------------
 # Logging setup — one logger per module, not the root logger
@@ -84,6 +89,86 @@ METRIC_MAP: dict[str, str] = {
     "network_in_bytes":     "Network In Total",
     "network_out_bytes":    "Network Out Total",
 }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Shared Azure Credential Factory & Offline LocalMonitor
+# ═══════════════════════════════════════════════════════════════════════════
+def build_azure_credential() -> tuple[Any, AuthMode]:
+    """Return ``(credential, AuthMode)`` based on configured environment variables."""
+    tenant = os.getenv("AZURE_TENANT_ID")
+    client_id = os.getenv("AZURE_CLIENT_ID")
+    client_secret = os.getenv("AZURE_CLIENT_SECRET")
+
+    if (
+        not is_placeholder_value(tenant)
+        and not is_placeholder_value(client_id)
+        and not is_placeholder_value(client_secret)
+    ):
+        logger.info("Using ClientSecretCredential (service principal).")
+        return (
+            ClientSecretCredential(
+                tenant_id=tenant,
+                client_id=client_id,
+                client_secret=client_secret,
+            ),
+            AuthMode.SERVICE_PRINCIPAL,
+        )
+    logger.info("Using DefaultAzureCredential (CLI / managed identity).")
+    return DefaultAzureCredential(exclude_environment_credential=True), AuthMode.DEFAULT_CREDENTIAL
+
+
+class LocalMonitor:
+    """SQLite-backed MonitorAgent substitute when Azure credentials are absent."""
+
+    def __init__(self, db_path: str = DB_PATH, resource_id: str | None = None) -> None:
+        self.db_path = db_path
+        self.resource_id = resource_id or AZURE_VM_RESOURCE_ID or "local-synthetic-vm"
+        self.is_live = False
+        self.data_source_mode = DataSourceMode.LOCAL_SQLITE
+
+    def get_metric_history(self, metric: str, hours: int = 24) -> pd.DataFrame:
+        if metric not in METRIC_MAP:
+            raise ValueError(f"Unknown metric '{metric}'.")
+        if not os.path.exists(self.db_path):
+            return pd.DataFrame(columns=["ds", "y"])
+
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                f"SELECT MAX(timestamp) FROM vm_metrics WHERE {metric} IS NOT NULL"
+            )
+            latest_ts = cur.fetchone()[0]
+            if not latest_ts:
+                return pd.DataFrame(columns=["ds", "y"])
+
+            latest_dt = pd.to_datetime(latest_ts)
+            cutoff = (latest_dt - timedelta(hours=hours)).isoformat()
+
+            df = pd.read_sql_query(
+                f"SELECT timestamp AS ds, {metric} AS y "
+                f"FROM vm_metrics "
+                f"WHERE timestamp >= ? AND {metric} IS NOT NULL "
+                f"ORDER BY timestamp ASC",
+                conn,
+                params=(cutoff,),
+            )
+
+        if not df.empty:
+            df["ds"] = pd.to_datetime(df["ds"])
+        return df
+
+    def get_latest_metrics(self, limit: int = 100) -> pd.DataFrame:
+        if not os.path.exists(self.db_path):
+            return pd.DataFrame()
+        with sqlite3.connect(self.db_path) as conn:
+            df = pd.read_sql_query(
+                "SELECT timestamp, cpu_percent, available_memory, "
+                "disk_read_ops, disk_write_ops, network_in_bytes, network_out_bytes "
+                "FROM vm_metrics ORDER BY timestamp DESC LIMIT ?",
+                conn,
+                params=(limit,),
+            )
+        return df.iloc[::-1].reset_index(drop=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -130,12 +215,12 @@ class MonitorAgent:
         self.interval = interval
 
         # Validate essential config
-        if not self.subscription_id:
+        if is_placeholder_value(self.subscription_id):
             raise ValueError(
-                "AZURE_SUBSCRIPTION_ID is not set. "
+                "AZURE_SUBSCRIPTION_ID is not set or still contains placeholder values. "
                 "Please configure it in .env or pass it explicitly."
             )
-        if not self.resource_id or "..." in self.resource_id:
+        if is_placeholder_value(self.resource_id):
             raise ValueError(
                 "AZURE_VM_RESOURCE_ID is not set or still contains placeholder "
                 "values. Please update your .env file."
@@ -143,12 +228,17 @@ class MonitorAgent:
 
         # Authenticate — prefer service-principal if env vars present,
         # else fall back to DefaultAzureCredential (managed identity / CLI).
-        self._credential = self._build_credential()
+        self._credential, self.auth_mode = build_azure_credential()
+        self.data_source_mode = DataSourceMode.AZURE_LIVE
+        self.is_live = True
         self._client = MonitorManagementClient(
             credential=self._credential,
             subscription_id=self.subscription_id,
         )
-        logger.info("Azure Monitor client initialised successfully.")
+        logger.info(
+            "Azure Monitor client initialised successfully (auth=%s).",
+            self.auth_mode.value,
+        )
 
         # Ensure the database & table exist
         self._init_db()
@@ -158,19 +248,8 @@ class MonitorAgent:
     @staticmethod
     def _build_credential():
         """Return the most appropriate Azure credential object."""
-        tenant = os.getenv("AZURE_TENANT_ID")
-        client_id = os.getenv("AZURE_CLIENT_ID")
-        client_secret = os.getenv("AZURE_CLIENT_SECRET")
-
-        if tenant and client_id and client_secret:
-            logger.info("Using ClientSecretCredential (service principal).")
-            return ClientSecretCredential(
-                tenant_id=tenant,
-                client_id=client_id,
-                client_secret=client_secret,
-            )
-        logger.info("Using DefaultAzureCredential (CLI / managed identity).")
-        return DefaultAzureCredential()
+        credential, _ = build_azure_credential()
+        return credential
 
     # ---- SQLite initialisation --------------------------------------------
 

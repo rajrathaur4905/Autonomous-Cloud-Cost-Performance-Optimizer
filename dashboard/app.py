@@ -7,6 +7,7 @@ Open:  http://localhost:8050
 Deps:  pip install dash pandas
 """
 
+import logging
 import sys
 import os
 
@@ -23,6 +24,9 @@ import pandas as pd
 
 import db
 import pages
+from Agents.state_machines import ForecastChartMode, PipelineStage
+
+logger = logging.getLogger("opticloud_dashboard")
 
 try:
     from config.app import LocalMonitor, run_pipeline
@@ -188,6 +192,7 @@ app.layout = html.Div([
     dcc.Location(id='url', refresh=False),
     dcc.Store(id='_'),
     dcc.Store(id='pipeline-trigger', data=0),
+    dcc.Store(id='pipeline-state', data=PipelineStage.IDLE.value),
     sidebar,
     html.Div(className='main-content', children=[
         topbar,
@@ -271,26 +276,27 @@ app.clientside_callback(
 @app.callback(
     Output('pipeline-status', 'children'),
     Output('pipeline-trigger', 'data'),
+    Output('pipeline-state', 'data'),
     Input('run-pipeline-btn', 'n_clicks'),
     State('pipeline-trigger', 'data'),
     prevent_initial_call=True,
 )
 def trigger_pipeline(n_clicks, current):
     if not n_clicks:
-        return '', current or 0
+        return '', current or 0, PipelineStage.IDLE.value
     if not _PIPELINE_AVAILABLE or run_pipeline is None:
         return html.Span(
             'Pipeline agents unavailable (check dependencies).',
             className='status-pill err',
-        ), current or 0
+        ), current or 0, PipelineStage.ERROR.value
 
     try:
-        res = run_pipeline(dry_run=True, db_path=db._DB)
+        res = run_pipeline(dry_run=True, current_vm_size=None, db_path=db._DB)
         if not res.get('ok'):
             return html.Span(
                 res.get('error', 'Pipeline did not complete.'),
                 className='status-pill warn',
-            ), current or 0
+            ), current or 0, PipelineStage.WARNING.value
 
         dec = res.get('decision', {})
         dep = res.get('deployment', {})
@@ -300,12 +306,13 @@ def trigger_pipeline(n_clicks, current):
             html.I(className='fa-solid fa-check'),
             f'{action} · Deploy: {dep_status} · Explanation saved',
         ], className='status-pill ok')
-        return pill, (current or 0) + 1
+        return pill, (current or 0) + 1, PipelineStage.SUCCEEDED.value
     except Exception as exc:
+        logger.exception("Dashboard pipeline trigger failed")
         return html.Span(
             f'Pipeline error: {exc}',
             className='status-pill err',
-        ), current or 0
+        ), current or 0, PipelineStage.ERROR.value
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -501,18 +508,26 @@ def _scale_factor(metric: str) -> float:
     Input('f-metric', 'value'),
 )
 def update_forecast(metric):
-    fallback_badge = [
-        html.I(className='fa-solid fa-chart-line', style={'marginRight': '5px'}),
-        'Rolling Avg',
-    ]
+    def _badge(mode: ForecastChartMode, text: str):
+        icon = 'fa-brain' if mode == ForecastChartMode.PROPHET_ML else 'fa-chart-line'
+        return [
+            html.I(className=f'fa-solid {icon}', style={'marginRight': '5px'}),
+            text,
+        ]
 
     df = db.metrics(0)
     if df.empty or metric not in df.columns:
-        return _empty_fig(), '—', '—', '—', '—', fallback_badge
+        return (
+            _empty_fig(), '—', '—', '—', '—',
+            _badge(ForecastChartMode.NO_DATA, 'No Data'),
+        )
 
     series = df[metric].dropna()
     if series.empty:
-        return _empty_fig(), '—', '—', '—', '—', fallback_badge
+        return (
+            _empty_fig(), '—', '—', '—', '—',
+            _badge(ForecastChartMode.NO_DATA, 'No Data'),
+        )
 
     scale = _scale_factor(metric)
     vals = series * scale
@@ -522,6 +537,7 @@ def update_forecast(metric):
     std = f'{vals.std():.1f}'
 
     # Try real ForecastAgent (Prophet)
+    fallback_reason = None
     if _PIPELINE_AVAILABLE and LocalMonitor is not None and ForecastAgent is not None:
         try:
             monitor = LocalMonitor(db_path=db._DB)
@@ -575,14 +591,19 @@ def update_forecast(metric):
                         hovertemplate='Anomaly: %{y:.1f}<extra></extra>',
                     ))
 
-                badge = [
-                    html.I(className='fa-solid fa-brain',
-                           style={'marginRight': '5px'}),
-                    f'Prophet ML · {anom_cnt} anomalies (48 h)',
-                ]
-                return fig, avg, mn, mx, std, badge
-        except Exception:
-            pass
+                return (
+                    fig, avg, mn, mx, std,
+                    _badge(
+                        ForecastChartMode.PROPHET_ML,
+                        f'Prophet ML · {anom_cnt} anomalies (48 h)',
+                    ),
+                )
+            fallback_reason = fc_res.get('error', 'insufficient history')
+        except Exception as exc:
+            logger.warning("Prophet forecast fallback for %s: %s", metric, exc)
+            fallback_reason = 'Prophet error'
+    else:
+        fallback_reason = 'Prophet unavailable'
 
     # Fallback: historical + 1h rolling mean
     plot = df.loc[series.index].copy()
@@ -601,7 +622,11 @@ def update_forecast(metric):
         hovertemplate='%{y:.1f}<extra></extra>',
     ))
 
-    return fig, avg, mn, mx, std, fallback_badge
+    badge_label = f'Rolling Avg ({fallback_reason})' if fallback_reason else 'Rolling Avg'
+    return (
+        fig, avg, mn, mx, std,
+        _badge(ForecastChartMode.ROLLING_AVG_FALLBACK, badge_label),
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

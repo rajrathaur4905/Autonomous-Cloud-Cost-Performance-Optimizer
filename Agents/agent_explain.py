@@ -47,7 +47,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from config.settings import DB_PATH, GEMINI_API_KEY, LLM_MODEL
-from Agents.agent_optimize import VM_SIZE_CATALOG
+from Agents.state_machines import LLMTransportMode, VM_SIZE_CATALOG, is_placeholder_value
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -89,22 +89,28 @@ class ExplainAgent:
         model: str | None = None,
     ):
         self.db_path = db_path or DB_PATH
-        self.api_key = api_key or GEMINI_API_KEY
+        self.api_key = api_key if api_key is not None else GEMINI_API_KEY
         self.model = model or LLM_MODEL
-        
-        if not self.api_key or "paste-your" in self.api_key:
+
+        if is_placeholder_value(self.api_key):
             logger.warning(
                 "GEMINI_API_KEY not set or contains placeholder. ExplainAgent will work in offline mode "
                 "(context assembly only, no LLM calls)."
             )
+            self.transport_mode = LLMTransportMode.OFFLINE
             self.client = None
         elif genai is not None:
+            self.transport_mode = LLMTransportMode.GENAI_SDK
             self.client = genai.Client(api_key=self.api_key)
         else:
-            self.client = "requests"
-            
+            self.transport_mode = LLMTransportMode.REST_API
+            self.client = None
+
         self._init_db()
-        logger.info("ExplainAgent initialised (model='%s', offline=%s)", self.model, self.client is None)
+        logger.info(
+            "ExplainAgent initialised (model='%s', transport='%s')",
+            self.model, self.transport_mode.value,
+        )
 
     def _init_db(self) -> None:
         """Create the ``explanations`` table if it does not exist."""
@@ -251,79 +257,62 @@ Write a clear, professional explanation in 3-4 sentences that:
             )
             conn.commit()
 
-    def explain(
-        self,
-        decision: dict | None = None,
-        deployment: dict | None = None,
-    ) -> dict:
-        """Core logic to generate explanation from decision/deployment data."""
-        logger.info("Assembling context for explanation...")
-        
-        # 1. Assemble context
-        context = self._assemble_context(decision, deployment)
-        
-        # 2. Build prompt
-        user_prompt = self._build_prompt(context)
-        
-        # 3. Call LLM
-        prompt_tokens = 0
-        completion_tokens = 0
-        
-        if self.client is None:
-            logger.info("Offline mode active. Generating fallback explanation.")
-            narrative = f"[OFFLINE MODE — LLM not called]\n\nPrompt that would be sent:\n{user_prompt}"
-        elif self.client == "requests":
-            logger.info("Calling Google Gemini API (%s) via REST...", self.model)
-            try:
-                full_prompt = f"{DEFAULT_SYSTEM_PROMPT}\n\n{user_prompt}"
-                models_to_try = [self.model]
-                for fb in ["gemini-flash-lite-latest", "gemini-3-flash-preview"]:
-                    if fb not in models_to_try:
-                        models_to_try.append(fb)
-                
-                success = False
-                for m in models_to_try:
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent"
-                    headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
-                    payload = {
-                        "contents": [{"parts": [{"text": full_prompt}]}],
-                        "generationConfig": {
-                            "temperature": LLM_TEMPERATURE,
-                            "maxOutputTokens": LLM_MAX_TOKENS,
-                        }
-                    }
-                    resp = requests.post(url, headers=headers, json=payload, timeout=30)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        candidates = data.get("candidates", [])
-                        if candidates:
-                            parts = candidates[0].get("content", {}).get("parts", [])
-                            if parts:
-                                narrative = parts[0].get("text", "").strip()
-                        usage = data.get("usageMetadata", {})
-                        prompt_tokens = usage.get("promptTokenCount", 0)
-                        completion_tokens = usage.get("candidatesTokenCount", 0)
-                        self.model = m
-                        logger.info("Successfully generated explanation via Gemini REST using model '%s'.", m)
-                        success = True
-                        break
-                    else:
-                        logger.warning("Gemini model '%s' returned status %d. Trying next...", m, resp.status_code)
+    def _candidate_models(self) -> list[str]:
+        """Return ordered Gemini model IDs to try without mutating ``self.model``."""
+        models = [self.model]
+        for fb in ("gemini-flash-lite-latest", "gemini-3-flash-preview"):
+            if fb not in models:
+                models.append(fb)
+        return models
 
-                if not success:
-                    logger.error("All Gemini models failed. Last error: %s", resp.text)
-                    narrative = f"[LLM ERROR] Gemini API returned HTTP {resp.status_code}: {resp.text}"
-            except Exception as e:
-                logger.error("Failed to generate explanation from Gemini REST: %s", e)
-                narrative = f"[LLM ERROR] Unable to generate explanation: {e}"
-        else:
-            logger.info("Calling Google Gemini API (%s)...", self.model)
+    def _call_rest_api(self, full_prompt: str) -> tuple[str, str, int, int, str]:
+        """Call Gemini REST endpoint with model fallback."""
+        last_status = None
+        last_text = ""
+        for model_name in self._candidate_models():
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+            headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
+            payload = {
+                "contents": [{"parts": [{"text": full_prompt}]}],
+                "generationConfig": {
+                    "temperature": LLM_TEMPERATURE,
+                    "maxOutputTokens": LLM_MAX_TOKENS,
+                },
+            }
+            resp = requests.post(url, headers=headers, json=payload, timeout=30)
+            last_status = resp.status_code
+            last_text = resp.text
+            if resp.status_code == 200:
+                data = resp.json()
+                narrative = ""
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        narrative = parts[0].get("text", "").strip()
+                usage = data.get("usageMetadata", {})
+                prompt_tokens = usage.get("promptTokenCount", 0)
+                completion_tokens = usage.get("candidatesTokenCount", 0)
+                logger.info("Generated explanation via Gemini REST using '%s'.", model_name)
+                return narrative, model_name, prompt_tokens, completion_tokens, "ok"
+            logger.warning("Gemini model '%s' returned status %d. Trying next...", model_name, resp.status_code)
+
+        logger.error("All Gemini REST models failed. Last error: %s", last_text)
+        return (
+            f"[LLM ERROR] Gemini API returned HTTP {last_status}: {last_text}",
+            self.model,
+            0,
+            0,
+            "error",
+        )
+
+    def _call_genai_sdk(self, full_prompt: str) -> tuple[str, str, int, int, str]:
+        """Call Gemini via google.genai SDK with unified model fallback."""
+        last_exc: Exception | None = None
+        for model_name in self._candidate_models():
             try:
-                # Combine system prompt and user prompt for Gemini
-                full_prompt = f"{DEFAULT_SYSTEM_PROMPT}\n\n{user_prompt}"
-                
                 response = self.client.models.generate_content(
-                    model=self.model,
+                    model=model_name,
                     contents=full_prompt,
                     config=genai.types.GenerateContentConfig(
                         temperature=LLM_TEMPERATURE,
@@ -331,23 +320,70 @@ Write a clear, professional explanation in 3-4 sentences that:
                     ),
                 )
                 narrative = response.text.strip()
-                
-                # Extract token usage from Gemini response metadata
+                prompt_tokens = 0
+                completion_tokens = 0
                 if response.usage_metadata:
                     prompt_tokens = response.usage_metadata.prompt_token_count or 0
                     completion_tokens = response.usage_metadata.candidates_token_count or 0
-                
-                logger.info("Successfully generated explanation via Gemini.")
+                logger.info("Generated explanation via Gemini SDK using '%s'.", model_name)
+                return narrative, model_name, prompt_tokens, completion_tokens, "ok"
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("Gemini SDK model '%s' failed: %s. Trying next...", model_name, exc)
+
+        logger.error("All Gemini SDK models failed: %s", last_exc)
+        return (
+            f"[LLM ERROR] Unable to generate explanation: {last_exc}",
+            self.model,
+            0,
+            0,
+            "error",
+        )
+
+    def explain(
+        self,
+        decision: dict | None = None,
+        deployment: dict | None = None,
+    ) -> dict:
+        """Core logic to generate explanation from decision/deployment data."""
+        logger.info("Assembling context for explanation...")
+
+        # 1. Assemble context
+        context = self._assemble_context(decision, deployment)
+
+        # 2. Build prompt
+        user_prompt = self._build_prompt(context)
+
+        # 3. Dispatch based on explicit LLMTransportMode
+        prompt_tokens = 0
+        completion_tokens = 0
+        model_used = LLMTransportMode.OFFLINE.value
+        llm_status = "offline"
+
+        if self.transport_mode == LLMTransportMode.OFFLINE:
+            logger.info("Offline mode active. Generating fallback explanation.")
+            narrative = f"[OFFLINE MODE — LLM not called]\n\nPrompt that would be sent:\n{user_prompt}"
+        elif self.transport_mode == LLMTransportMode.REST_API:
+            logger.info("Calling Google Gemini API (%s) via REST...", self.model)
+            full_prompt = f"{DEFAULT_SYSTEM_PROMPT}\n\n{user_prompt}"
+            try:
+                narrative, model_used, prompt_tokens, completion_tokens, llm_status = self._call_rest_api(full_prompt)
             except Exception as e:
-                logger.error("Failed to generate explanation from Gemini: %s", e)
+                logger.error("Failed to generate explanation from Gemini REST: %s", e)
                 narrative = f"[LLM ERROR] Unable to generate explanation: {e}"
+                model_used = self.model
+                llm_status = "error"
+        else:
+            logger.info("Calling Google Gemini API (%s) via SDK...", self.model)
+            full_prompt = f"{DEFAULT_SYSTEM_PROMPT}\n\n{user_prompt}"
+            narrative, model_used, prompt_tokens, completion_tokens, llm_status = self._call_genai_sdk(full_prompt)
 
         # 4. Generate summary one-liner
         action_str = str(context.get('action', 'unknown')).upper()
         savings_str = f"₹{context.get('estimated_monthly_savings', 0):.0f}"
         target = context.get('recommended_size', 'N/A')
         summary = f"{action_str}: {context['current_size']} → {target} | Savings: {savings_str}/mo"
-        
+
         # 5. Calculate cost (Gemini Flash pricing: ~$0.075/1M input, ~$0.30/1M output)
         input_cost = (prompt_tokens / 1_000_000) * 0.075
         output_cost = (completion_tokens / 1_000_000) * 0.30
@@ -360,13 +396,15 @@ Write a clear, professional explanation in 3-4 sentences that:
             "deployment_id": context.get("deployment_id"),
             "narrative": narrative,
             "summary_one_liner": summary,
-            "llm_model_used": self.model if self.client else "offline",
+            "llm_model_used": model_used,
+            "llm_transport_mode": self.transport_mode.value,
+            "llm_status": llm_status,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "llm_cost_usd": round(llm_cost, 6),
-            "context": context
+            "context": context,
         }
-        
+
         self._log_explanation(result)
         return result
 

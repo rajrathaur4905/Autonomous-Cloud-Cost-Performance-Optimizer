@@ -305,6 +305,15 @@ _COND = [
      'color': '#f6b94b'},
     {'if': {'filter_query': '{risk_level} = "HIGH"', 'column_id': 'risk_level'},
      'color': '#ff647c'},
+    # Deployment status colours
+    {'if': {'filter_query': '{status} = "completed" || {status} = "dry_run"', 'column_id': 'status'},
+     'color': '#35d49a'},
+    {'if': {'filter_query': '{status} = "skipped"', 'column_id': 'status'},
+     'color': '#94a3b8'},
+    {'if': {'filter_query': '{status} = "pending" || {status} = "approved" || {status} = "executing"', 'column_id': 'status'},
+     'color': '#38bdf8'},
+    {'if': {'filter_query': '{status} = "failed" || {status} = "rejected" || {status} = "rolled_back"', 'column_id': 'status'},
+     'color': '#ff647c'},
 ]
 
 

@@ -62,7 +62,8 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from config.settings import DB_PATH
-from Agents.agent_monitor import MonitorAgent, METRIC_MAP
+from Agents.agent_monitor import LocalMonitor, MonitorAgent, METRIC_MAP
+from Agents.state_machines import AlertSeverity, ForecastStatus
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -221,6 +222,7 @@ class ForecastAgent:
                 "history": history,
                 "forecast": pd.DataFrame(),
                 "model": None,
+                "status": ForecastStatus.INSUFFICIENT_DATA.value,
                 "error": "Insufficient historical data",
             }
 
@@ -250,6 +252,7 @@ class ForecastAgent:
             "history": history,
             "forecast": forecast_cols,
             "model": model,
+            "status": ForecastStatus.OK.value,
         }
 
     # ---- public: anomaly detection ----------------------------------------
@@ -298,6 +301,7 @@ class ForecastAgent:
                 "anomaly_ratio": 0.0,
                 "anomalies": pd.DataFrame(),
                 "all_predictions": pd.DataFrame(),
+                "status": ForecastStatus.INSUFFICIENT_DATA.value,
                 "error": "Insufficient historical data",
             }
 
@@ -336,6 +340,7 @@ class ForecastAgent:
             "anomaly_ratio": round(count / total, 4) if total > 0 else 0.0,
             "anomalies": anomalies,
             "all_predictions": merged,
+            "status": ForecastStatus.OK.value,
         }
 
     # ---- public: threshold breach prediction ------------------------------
@@ -402,15 +407,20 @@ class ForecastAgent:
                 "max_forecasted": None,
                 "min_forecasted": None,
                 "breach_points": pd.DataFrame(),
+                "status": result.get("status", ForecastStatus.INSUFFICIENT_DATA.value),
                 "error": result.get("error", "Empty forecast"),
             }
 
         forecast = result["forecast"]
+        history = result.get("history", pd.DataFrame())
 
-        # Only look at *future* points (after the last historical timestamp)
-        # Use tz-naive now() to match Prophet's tz-naive output
-        now = datetime.utcnow()
-        future_forecast = forecast[forecast["ds"] > now].copy()
+        # Only look at *future* points (after the latest historical observation)
+        anchor = (
+            history["ds"].max()
+            if not history.empty and "ds" in history.columns
+            else pd.Timestamp(datetime.now(timezone.utc).replace(tzinfo=None))
+        )
+        future_forecast = forecast[forecast["ds"] > anchor].copy()
 
         if future_forecast.empty:
             return {
@@ -423,6 +433,7 @@ class ForecastAgent:
                 "max_forecasted": None,
                 "min_forecasted": None,
                 "breach_points": pd.DataFrame(),
+                "status": ForecastStatus.NO_FUTURE_POINTS.value,
             }
 
         # Determine breach direction
@@ -443,11 +454,16 @@ class ForecastAgent:
         if will_breach:
             first_breach_time = breach_points["ds"].iloc[0]
             first_breach_at = first_breach_time.isoformat()
-            delta = first_breach_time - pd.Timestamp(now)
-            hours, remainder = divmod(int(delta.total_seconds()), 3600)
+            delta = first_breach_time - pd.Timestamp(anchor)
+            hours, remainder = divmod(max(0, int(delta.total_seconds())), 3600)
             minutes = remainder // 60
             time_to_breach = f"{hours}h {minutes}m"
 
+        status = (
+            ForecastStatus.BREACH_PREDICTED.value
+            if will_breach
+            else ForecastStatus.OK.value
+        )
         result_dict = {
             "metric": metric,
             "threshold": threshold,
@@ -458,6 +474,7 @@ class ForecastAgent:
             "max_forecasted": round(float(future_forecast["yhat"].max()), 4),
             "min_forecasted": round(float(future_forecast["yhat"].min()), 4),
             "breach_points": breach_points,
+            "status": status,
         }
 
         if will_breach:
@@ -707,7 +724,7 @@ class ForecastAgent:
                     "threshold": breach_info.get("threshold"),
                     "time_to_breach": breach_info.get("time_to_breach"),
                     "first_breach_at": breach_info.get("first_breach_at"),
-                    "severity": "HIGH",
+                    "severity": AlertSeverity.HIGH.value,
                 })
 
             if anomaly_info.get("anomaly_ratio", 0) > 0.1:
@@ -716,7 +733,7 @@ class ForecastAgent:
                     "metric": metric_name,
                     "anomaly_ratio": anomaly_info["anomaly_ratio"],
                     "anomaly_count": anomaly_info["anomaly_count"],
-                    "severity": "MEDIUM",
+                    "severity": AlertSeverity.MEDIUM.value,
                 })
 
         summary["total_alerts"] = len(summary["alerts"])
@@ -794,47 +811,10 @@ if __name__ == "__main__":
     except (ValueError, Exception) as exc:
         logger.warning(
             "MonitorAgent init failed (%s). "
-            "Falling back to direct DB reader for local/synthetic testing.",
+            "Falling back to LocalMonitor for offline/synthetic testing.",
             exc,
         )
-
-        # Build a minimal stand-in that reads directly from SQLite
-        class _LocalMonitor:
-            """Lightweight MonitorAgent substitute for offline testing."""
-
-            def __init__(self, db_path: str) -> None:
-                self.db_path = db_path
-
-            def get_metric_history(self, metric: str, hours: int = 24):
-                import sqlite3 as _sql
-                if metric not in METRIC_MAP:
-                    raise ValueError(f"Unknown metric '{metric}'.")
-                cutoff = (
-                    datetime.utcnow() - timedelta(hours=hours)
-                ).isoformat()
-                with _sql.connect(self.db_path) as conn:
-                    df = pd.read_sql_query(
-                        f"SELECT timestamp AS ds, {metric} AS y "
-                        f"FROM vm_metrics "
-                        f"WHERE timestamp >= ? AND {metric} IS NOT NULL "
-                        f"ORDER BY timestamp ASC",
-                        conn,
-                        params=(cutoff,),
-                    )
-                if not df.empty:
-                    df["ds"] = pd.to_datetime(df["ds"])
-                return df
-
-            def get_latest_metrics(self, limit: int = 100):
-                import sqlite3 as _sql
-                with _sql.connect(self.db_path) as conn:
-                    return pd.read_sql_query(
-                        "SELECT * FROM vm_metrics ORDER BY timestamp DESC LIMIT ?",
-                        conn,
-                        params=(limit,),
-                    )
-
-        monitor = _LocalMonitor(DB_PATH)
+        monitor = LocalMonitor(DB_PATH)
 
     forecaster = ForecastAgent(monitor, lookback_hours=args.lookback)
 

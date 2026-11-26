@@ -47,6 +47,16 @@ if _PROJECT_ROOT not in sys.path:
 from config.settings import DB_PATH
 from Agents.agent_monitor import MonitorAgent
 from Agents.agent_forecast import ForecastAgent
+from Agents.state_machines import (
+    ConfidenceLevel,
+    CooldownState,
+    DeploymentStatus,
+    RiskLevel,
+    ScalingAction,
+    VM_SIZE_CATALOG,
+    VM_SIZE_ORDER,
+    VMTierStateMachine,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -64,30 +74,13 @@ if not logger.handlers:
     logger.addHandler(_handler)
 
 # ---------------------------------------------------------------------------
-# Azure VM Size Catalog & Configuration Constants
-# ---------------------------------------------------------------------------
-VM_SIZE_CATALOG = {
-    "Standard_B1s":  {"vcpus": 1, "ram_gb": 1,   "cost_per_hour": 0.60},
-    "Standard_B1ms": {"vcpus": 1, "ram_gb": 2,   "cost_per_hour": 1.20},
-    "Standard_B2s":  {"vcpus": 2, "ram_gb": 4,   "cost_per_hour": 2.40},
-    "Standard_B2ms": {"vcpus": 2, "ram_gb": 8,   "cost_per_hour": 4.80},
-    "Standard_B4ms": {"vcpus": 4, "ram_gb": 16,  "cost_per_hour": 9.60},
-}
-
-VM_SIZE_ORDER = [
-    "Standard_B1s",
-    "Standard_B1ms",
-    "Standard_B2s",
-    "Standard_B2ms",
-    "Standard_B4ms"
-]
-
 # Decision Thresholds
+# ---------------------------------------------------------------------------
 DOWNSIZE_UPPER_THRESHOLD = 20.0
 UPSIZE_LOWER_THRESHOLD = 70.0
 FORECAST_WINDOW_HOURS = 4
 COOLDOWN_MINUTES = 60
-MIN_CONFIDENCE = "high"
+MIN_CONFIDENCE = ConfidenceLevel.HIGH.value
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -104,11 +97,7 @@ class OptimizeAgent:
     ):
         self.monitor = monitor
         self.forecaster = forecaster
-        
-        if current_vm_size not in VM_SIZE_CATALOG:
-            raise ValueError(f"Unknown VM size '{current_vm_size}'. Must be one of {VM_SIZE_ORDER}")
-            
-        self.current_vm_size = current_vm_size
+        self._tier_sm = VMTierStateMachine(current_vm_size)
         self.db_path = db_path or DB_PATH
         self.dry_run = dry_run
         
@@ -117,6 +106,14 @@ class OptimizeAgent:
             "OptimizeAgent initialised (current_vm_size='%s', dry_run=%s)",
             self.current_vm_size, self.dry_run
         )
+
+    @property
+    def current_vm_size(self) -> str:
+        return self._tier_sm.current_size
+
+    @current_vm_size.setter
+    def current_vm_size(self, value: str) -> None:
+        self._tier_sm.set_size(value)
 
     def _init_db(self) -> None:
         """Create the ``optimization_decisions`` table if it does not exist."""
@@ -150,48 +147,62 @@ class OptimizeAgent:
             conn.commit()
         logger.info("Decision database ready at %s", self.db_path)
 
-    def _check_cooldown(self) -> bool:
-        """Return True if a resize was done recently (cooldown active)."""
+    def get_cooldown_state(self) -> tuple[CooldownState, datetime | None]:
+        """Return ``(CooldownState, last_resize_time)``.
+
+        Only executed/pending resize actions in the same ``dry_run`` mode
+        trigger cooldown; rejected, failed, or skipped decisions do not.
+        """
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.execute(
                 """
-                SELECT timestamp FROM optimization_decisions 
-                WHERE action != 'hold' 
+                SELECT timestamp FROM optimization_decisions
+                WHERE action != ?
+                  AND status NOT IN (?, ?, ?)
+                  AND dry_run = ?
                 ORDER BY timestamp DESC LIMIT 1
-                """
+                """,
+                (
+                    ScalingAction.HOLD.value,
+                    DeploymentStatus.REJECTED.value,
+                    DeploymentStatus.FAILED.value,
+                    DeploymentStatus.SKIPPED.value,
+                    int(bool(self.dry_run)),
+                ),
             )
             row = cur.fetchone()
             if not row:
-                return False
-                
+                return CooldownState.READY, None
+
             last_action_time = datetime.fromisoformat(row[0])
             now = datetime.now(timezone.utc)
-            # Ensure both are tz-aware for comparison
             if last_action_time.tzinfo is None:
                 last_action_time = last_action_time.replace(tzinfo=timezone.utc)
-            return (now - last_action_time) < timedelta(minutes=COOLDOWN_MINUTES)
+            if (now - last_action_time) < timedelta(minutes=COOLDOWN_MINUTES):
+                return CooldownState.ACTIVE, last_action_time
+            return CooldownState.READY, last_action_time
+
+    def _check_cooldown(self) -> bool:
+        """Return True if a resize was done recently (cooldown active)."""
+        state, _ = self.get_cooldown_state()
+        return state == CooldownState.ACTIVE
 
     def _select_target_size(self, direction: str) -> str | None:
         """Given 'upsize' or 'downsize', return the next VM size in order."""
-        current_index = VM_SIZE_ORDER.index(self.current_vm_size)
-        if direction == "downsize" and current_index > 0:
-            return VM_SIZE_ORDER[current_index - 1]
-        elif direction == "upsize" and current_index < len(VM_SIZE_ORDER) - 1:
-            return VM_SIZE_ORDER[current_index + 1]
-        return None
+        return self._tier_sm.preview(direction)
 
     def _assess_risk(self, max_upper: float, min_lower: float, action: str) -> str:
         """Evaluate the risk level of a proposed action based on forecast uncertainty."""
         band_width = max_upper - min_lower
-        
+
         if band_width < 15.0:
-            return "LOW"
-        elif band_width >= 15.0 and action == "hold":
-            return "LOW"
-        elif band_width >= 30.0 and action != "hold":
-            return "HIGH"
+            return RiskLevel.LOW.value
+        elif band_width >= 15.0 and action == ScalingAction.HOLD.value:
+            return RiskLevel.LOW.value
+        elif band_width >= 30.0 and action != ScalingAction.HOLD.value:
+            return RiskLevel.HIGH.value
         else:
-            return "MEDIUM"
+            return RiskLevel.MEDIUM.value
 
     def _log_decision(self, decision: dict) -> None:
         """Insert the decision into optimization_decisions table."""
@@ -228,42 +239,50 @@ class OptimizeAgent:
         # 1. Get the forecast
         result = self.forecaster.get_forecast(metric, horizon_hours=horizon_hours)
         forecast_df = result.get("forecast", pd.DataFrame())
-        
-        now = datetime.utcnow()  # tz-naive to match Prophet's output
-        
+        history_df = result.get("history", pd.DataFrame())
+
+        now_utc = datetime.now(timezone.utc)
+        anchor = (
+            history_df["ds"].max()
+            if not history_df.empty and "ds" in history_df.columns
+            else pd.Timestamp(now_utc.replace(tzinfo=None))
+        )
+
         base_decision = {
-            "timestamp": now.isoformat(),
-            "resource_id": self.monitor.resource_id,
+            "timestamp": now_utc.isoformat(),
+            "resource_id": getattr(self.monitor, "resource_id", "local-synthetic-vm"),
             "current_size": self.current_vm_size,
-            "status": "pending",
+            "status": DeploymentStatus.PENDING.value,
             "dry_run": self.dry_run,
-            "estimated_monthly_savings": 0.0
+            "estimated_monthly_savings": 0.0,
         }
 
         if forecast_df.empty:
             logger.warning("Empty forecast received. Defaulting to 'hold'.")
             decision = {
                 **base_decision,
-                "action": "hold",
+                "action": ScalingAction.HOLD.value,
                 "reason": "Insufficient forecast data",
-                "confidence": "low",
-                "risk_level": "LOW",
-                "forecast_summary": {}
+                "confidence": ConfidenceLevel.LOW.value,
+                "risk_level": RiskLevel.LOW.value,
+                "cooldown_state": CooldownState.READY.value,
+                "forecast_summary": {},
             }
             self._log_decision(decision)
             return decision
 
-        # 2. Filter to future-only predictions
-        future = forecast_df[forecast_df["ds"] > now]
+        # 2. Filter to future-only predictions beyond the latest training sample
+        future = forecast_df[forecast_df["ds"] > anchor]
         if future.empty:
             logger.warning("No future predictions in forecast. Defaulting to 'hold'.")
             decision = {
                 **base_decision,
-                "action": "hold",
+                "action": ScalingAction.HOLD.value,
                 "reason": "No future forecast data points",
-                "confidence": "low",
-                "risk_level": "LOW",
-                "forecast_summary": {}
+                "confidence": ConfidenceLevel.LOW.value,
+                "risk_level": RiskLevel.LOW.value,
+                "cooldown_state": CooldownState.READY.value,
+                "forecast_summary": {},
             }
             self._log_decision(decision)
             return decision
@@ -272,54 +291,57 @@ class OptimizeAgent:
         avg_predicted = float(future["yhat"].mean())
         max_upper = float(future["yhat_upper"].max())
         min_lower = float(future["yhat_lower"].min())
-        
+
         forecast_summary = {
             "avg_predicted": round(avg_predicted, 2),
             "max_upper": round(max_upper, 2),
-            "min_lower": round(min_lower, 2)
+            "min_lower": round(min_lower, 2),
         }
 
-        # 4. Check cooldown
-        if self._check_cooldown():
+        # 4. Check cooldown state machine
+        cooldown_state, _ = self.get_cooldown_state()
+        if cooldown_state == CooldownState.ACTIVE:
             logger.info("Cooldown active. Action overriden to 'hold'.")
             decision = {
                 **base_decision,
-                "action": "hold",
+                "action": ScalingAction.HOLD.value,
                 "reason": "Cooldown period active from previous resize",
-                "confidence": "high",
-                "risk_level": "LOW",
-                "forecast_summary": forecast_summary
+                "confidence": ConfidenceLevel.HIGH.value,
+                "risk_level": RiskLevel.LOW.value,
+                "cooldown_state": cooldown_state.value,
+                "forecast_summary": forecast_summary,
             }
             self._log_decision(decision)
             return decision
 
         # 5. Apply the rules
-        action = "hold"
+        action = ScalingAction.HOLD.value
         reason = "Metrics within normal operating bounds"
-        confidence = "medium"
+        confidence = ConfidenceLevel.MEDIUM.value
 
         if max_upper < DOWNSIZE_UPPER_THRESHOLD:
-            action = "downsize"
+            action = ScalingAction.DOWNSIZE.value
             reason = f"Max predicted {metric} (upper bound) is {max_upper:.1f}% for next {horizon_hours}h — safe to downsize"
-            confidence = "high"
+            confidence = ConfidenceLevel.HIGH.value
         elif min_lower > UPSIZE_LOWER_THRESHOLD:
-            action = "upsize"
+            action = ScalingAction.UPSIZE.value
             reason = f"Min predicted {metric} (lower bound) is {min_lower:.1f}% for next {horizon_hours}h — risk of saturation"
-            confidence = "high"
+            confidence = ConfidenceLevel.HIGH.value
 
-        # 6. Select target VM size
+        # 6. Select target VM size via VMTierStateMachine
         recommended_size = None
-        if action != "hold":
-            recommended_size = self._select_target_size(action)
+        if action != ScalingAction.HOLD.value:
+            intended_action = action
+            recommended_size = self._select_target_size(intended_action)
             if not recommended_size:
-                logger.info("Cannot %s further. Already at limit. Overriding to 'hold'.", action)
-                action = "hold"
-                reason = f"Required {action} but already at size limit ({self.current_vm_size})"
-                confidence = "high"
-            
+                logger.info("Cannot %s further. Already at limit. Overriding to 'hold'.", intended_action)
+                action = ScalingAction.HOLD.value
+                reason = f"Required {intended_action} but already at size limit ({self.current_vm_size})"
+                confidence = ConfidenceLevel.HIGH.value
+
         # 7. Calculate estimated savings
         monthly_savings = 0.0
-        if action == "downsize" and recommended_size:
+        if action == ScalingAction.DOWNSIZE.value and recommended_size:
             current_cost = VM_SIZE_CATALOG[self.current_vm_size]["cost_per_hour"]
             new_cost = VM_SIZE_CATALOG[recommended_size]["cost_per_hour"]
             monthly_savings = (current_cost - new_cost) * 24 * 30
@@ -330,15 +352,16 @@ class OptimizeAgent:
         # 9. Package and log
         decision = {
             **base_decision,
-            "action": "hold" if action == "hold" else action,
+            "action": action,
             "recommended_size": recommended_size,
             "reason": reason,
             "confidence": confidence,
             "risk_level": risk_level,
+            "cooldown_state": cooldown_state.value,
             "estimated_monthly_savings": round(monthly_savings, 2),
-            "forecast_summary": forecast_summary
+            "forecast_summary": forecast_summary,
         }
-        
+
         self._log_decision(decision)
         logger.info("Decision: %s | Reason: %s", decision["action"].upper(), decision["reason"])
         return decision

@@ -28,11 +28,12 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from config.settings import AZURE_SUBSCRIPTION_ID, AZURE_VM_RESOURCE_ID, DB_PATH
-from Agents.agent_monitor import METRIC_MAP, MonitorAgent
+from Agents.agent_monitor import LocalMonitor, METRIC_MAP, MonitorAgent
 from Agents.agent_forecast import ForecastAgent
 from Agents.agent_optimize import OptimizeAgent
 from Agents.agent_deploy import DeployAgent
 from Agents.agent_explain import ExplainAgent
+from Agents.state_machines import DataSourceMode, is_azure_configured
 
 logger = logging.getLogger("pipeline_orchestrator")
 logger.setLevel(logging.INFO)
@@ -47,67 +48,9 @@ if not logger.handlers:
     logger.addHandler(_handler)
 
 
-class LocalMonitor:
-    """SQLite-backed MonitorAgent substitute when Azure credentials are absent."""
-
-    def __init__(self, db_path: str = DB_PATH, resource_id: str | None = None) -> None:
-        self.db_path = db_path
-        self.resource_id = resource_id or AZURE_VM_RESOURCE_ID or "local-synthetic-vm"
-        self.is_live = False
-
-    def get_metric_history(self, metric: str, hours: int = 24) -> pd.DataFrame:
-        if metric not in METRIC_MAP:
-            raise ValueError(f"Unknown metric '{metric}'.")
-        if not os.path.exists(self.db_path):
-            return pd.DataFrame(columns=["ds", "y"])
-
-        with sqlite3.connect(self.db_path) as conn:
-            # Anchor lookback to latest available sample when running on older synthetic data
-            cur = conn.execute(
-                f"SELECT MAX(timestamp) FROM vm_metrics WHERE {metric} IS NOT NULL"
-            )
-            latest_ts = cur.fetchone()[0]
-            if not latest_ts:
-                return pd.DataFrame(columns=["ds", "y"])
-
-            latest_dt = pd.to_datetime(latest_ts)
-            cutoff = (latest_dt - timedelta(hours=hours)).isoformat()
-
-            df = pd.read_sql_query(
-                f"SELECT timestamp AS ds, {metric} AS y "
-                f"FROM vm_metrics "
-                f"WHERE timestamp >= ? AND {metric} IS NOT NULL "
-                f"ORDER BY timestamp ASC",
-                conn,
-                params=(cutoff,),
-            )
-
-        if not df.empty:
-            df["ds"] = pd.to_datetime(df["ds"])
-        return df
-
-    def get_latest_metrics(self, limit: int = 100) -> pd.DataFrame:
-        if not os.path.exists(self.db_path):
-            return pd.DataFrame()
-        with sqlite3.connect(self.db_path) as conn:
-            df = pd.read_sql_query(
-                "SELECT timestamp, cpu_percent, available_memory, "
-                "disk_read_ops, disk_write_ops, network_in_bytes, network_out_bytes "
-                "FROM vm_metrics ORDER BY timestamp DESC LIMIT ?",
-                conn,
-                params=(limit,),
-            )
-        return df.iloc[::-1].reset_index(drop=True)
-
-
 def get_monitor(db_path: str = DB_PATH) -> tuple[MonitorAgent | LocalMonitor, bool]:
     """Return (MonitorAgent, True) if Azure is configured, else (LocalMonitor, False)."""
-    has_azure = (
-        bool(AZURE_SUBSCRIPTION_ID)
-        and bool(AZURE_VM_RESOURCE_ID)
-        and "..." not in str(AZURE_VM_RESOURCE_ID)
-    )
-    if has_azure:
+    if is_azure_configured(AZURE_SUBSCRIPTION_ID, AZURE_VM_RESOURCE_ID):
         try:
             return MonitorAgent(db_path=db_path), True
         except Exception as exc:
@@ -128,12 +71,15 @@ def run_pipeline(
     metric: str = "cpu_percent",
     horizon_hours: int = 4,
     lookback_hours: int = 24,
-    current_vm_size: str = "Standard_B2s",
+    current_vm_size: str | None = None,
     dry_run: bool = True,
     db_path: str = DB_PATH,
 ) -> dict[str, Any]:
     """Execute the full 5-agent optimization loop and return a structured result."""
     monitor, is_live_azure = get_monitor(db_path=db_path)
+    data_source_mode = (
+        DataSourceMode.AZURE_LIVE if is_live_azure else DataSourceMode.LOCAL_SQLITE
+    )
     collected_rows = 0
 
     if is_live_azure and isinstance(monitor, MonitorAgent):
@@ -145,9 +91,12 @@ def run_pipeline(
             return {
                 "ok": False,
                 "mode": "local",
+                "data_source_mode": data_source_mode.value,
                 "error": "No VM metrics found in data/metrics.db. "
                          "Run `python data/generate_synthetic_data.py` or configure Azure credentials.",
             }
+
+    resolved_vm_size = current_vm_size or DeployAgent.get_effective_vm_size(db_path=db_path)
 
     forecaster = ForecastAgent(monitor, lookback_hours=lookback_hours)
     breach = forecaster.check_threshold_breach(
@@ -155,17 +104,21 @@ def run_pipeline(
     )
 
     optimizer = OptimizeAgent(
-        monitor, forecaster, current_vm_size=current_vm_size,
+        monitor, forecaster, current_vm_size=resolved_vm_size,
         db_path=db_path, dry_run=dry_run,
     )
     decision = optimizer.evaluate(metric=metric, horizon_hours=horizon_hours)
     decision["id"] = _latest_row_id(db_path, "optimization_decisions")
 
     deployer = DeployAgent(
-        current_vm_size=current_vm_size, db_path=db_path, dry_run=dry_run
+        current_vm_size=resolved_vm_size, db_path=db_path, dry_run=dry_run
     )
     deployment = deployer.execute_decision(decision)
-    deployment["id"] = _latest_row_id(db_path, "deployment_logs")
+    if deployment.get("id") is None:
+        deployment["id"] = _latest_row_id(db_path, "deployment_logs")
+
+    # Keep optimizer VM tier synchronized with deployer's resulting tier
+    optimizer.current_vm_size = deployer.current_vm_size
 
     explainer = ExplainAgent(db_path=db_path)
     explanation = explainer.explain(decision, deployment)
@@ -173,11 +126,14 @@ def run_pipeline(
     return {
         "ok": True,
         "mode": "azure" if is_live_azure else "local",
+        "data_source_mode": data_source_mode.value,
         "dry_run": dry_run,
+        "effective_vm_size": deployer.current_vm_size,
         "collected_rows": collected_rows,
         "breach": {
             "will_breach": breach.get("will_breach", False),
             "time_to_breach": breach.get("time_to_breach"),
+            "status": breach.get("status"),
         },
         "decision": decision,
         "deployment": deployment,

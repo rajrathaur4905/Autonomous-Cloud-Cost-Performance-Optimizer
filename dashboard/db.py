@@ -5,13 +5,27 @@ Read-only queries against the pipeline's SQLite database.
 Every function handles missing-db / empty-table gracefully.
 """
 
-import sqlite3
 import os
+import sqlite3
+import sys
 import pandas as pd
+
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+
+from Agents.state_machines import (
+    DEPLOY_FAILURE_STATUSES,
+    DEPLOY_SUCCESS_STATUSES,
+    DeploymentStatus,
+)
 
 _DB = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'metrics.db'
 )
+
+_SUCCESS_VALUES = {s.value for s in DEPLOY_SUCCESS_STATUSES}
+_FAILURE_VALUES = {s.value for s in DEPLOY_FAILURE_STATUSES}
 
 
 def db_exists() -> bool:
@@ -28,19 +42,18 @@ def _conn():
 
 def metrics(hours: int = 24) -> pd.DataFrame:
     """VM metrics for the last *hours* (pass 0 for everything)."""
-    conn = _conn()
-    if conn is None:
+    if not db_exists():
         return pd.DataFrame()
     try:
         base = ("SELECT timestamp, cpu_percent, available_memory, "
                 "disk_read_ops, disk_write_ops, "
                 "network_in_bytes, network_out_bytes FROM vm_metrics ")
-        if hours:
-            q = base + "ORDER BY timestamp DESC LIMIT ?"
-            df = pd.read_sql_query(q, conn, params=(hours * 12,))
-        else:
-            df = pd.read_sql_query(base + "ORDER BY timestamp", conn)
-        conn.close()
+        with sqlite3.connect(_DB) as conn:
+            if hours:
+                q = base + "ORDER BY timestamp DESC LIMIT ?"
+                df = pd.read_sql_query(q, conn, params=(hours * 12,))
+            else:
+                df = pd.read_sql_query(base + "ORDER BY timestamp", conn)
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df.sort_values('timestamp', inplace=True)
@@ -53,18 +66,17 @@ def metrics(hours: int = 24) -> pd.DataFrame:
 
 def decisions(limit: int = 100) -> pd.DataFrame:
     """Recent optimisation decisions."""
-    conn = _conn()
-    if conn is None:
+    if not db_exists():
         return pd.DataFrame()
     try:
-        df = pd.read_sql_query(
-            "SELECT id, timestamp, action, current_size, recommended_size, "
-            "reason, confidence, risk_level, estimated_monthly_savings, "
-            "status, dry_run "
-            "FROM optimization_decisions ORDER BY timestamp DESC LIMIT ?",
-            conn, params=(limit,),
-        )
-        conn.close()
+        with sqlite3.connect(_DB) as conn:
+            df = pd.read_sql_query(
+                "SELECT id, timestamp, action, current_size, recommended_size, "
+                "reason, confidence, risk_level, estimated_monthly_savings, "
+                "status, dry_run "
+                "FROM optimization_decisions ORDER BY timestamp DESC LIMIT ?",
+                conn, params=(limit,),
+            )
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
         return df
@@ -76,19 +88,18 @@ def decisions(limit: int = 100) -> pd.DataFrame:
 
 def explanation(decision_id) -> dict | None:
     """Return {'text', 'model', 'mode', 'cost_usd'} for a decision, or None."""
-    conn = _conn()
-    if conn is None:
+    if not db_exists():
         return None
     try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT narrative, llm_model_used, summary_one_liner, llm_cost_usd "
-            "FROM explanations WHERE decision_id = ? "
-            "ORDER BY timestamp DESC LIMIT 1",
-            (int(decision_id),),
-        )
-        row = cur.fetchone()
-        conn.close()
+        with sqlite3.connect(_DB) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT narrative, llm_model_used, summary_one_liner, llm_cost_usd "
+                "FROM explanations WHERE decision_id = ? "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (int(decision_id),),
+            )
+            row = cur.fetchone()
         if not row:
             return None
         model = row[1] or 'offline'
@@ -110,67 +121,73 @@ def summary() -> dict:
     """Aggregate statistics for the overview page."""
     s = dict(
         metrics=0, decisions=0, deploys=0, savings=0.0,
-        avg_cpu=0.0, down=0, up=0, hold=0, ok=0, fail=0,
+        avg_cpu=0.0, down=0, up=0, hold=0, ok=0, fail=0, skipped=0,
         dry_run=True,
     )
-    conn = _conn()
-    if conn is None:
+    if not db_exists():
         return s
-    c = conn.cursor()
 
-    def q(sql, default=0):
+    with sqlite3.connect(_DB) as conn:
+        c = conn.cursor()
+
+        def q(sql, default=0):
+            try:
+                c.execute(sql)
+                res = c.fetchone()
+                return res[0] if res and res[0] is not None else default
+            except Exception:
+                return default
+
+        s['metrics']   = q("SELECT COUNT(*) FROM vm_metrics")
+        s['decisions'] = q("SELECT COUNT(*) FROM optimization_decisions")
+        s['deploys']   = q("SELECT COUNT(*) FROM deployment_logs")
+        s['savings']   = round(
+            q("SELECT COALESCE(SUM(estimated_monthly_savings),0) "
+              "FROM optimization_decisions WHERE action='downsize' AND status != 'rejected'", 0.0), 2
+        )
+        s['avg_cpu'] = round(
+            q("SELECT COALESCE(AVG(cpu_percent),0) FROM "
+              "(SELECT cpu_percent FROM vm_metrics "
+              "ORDER BY timestamp DESC LIMIT 72)", 0.0), 1
+        )
+
+        latest_dry = q(
+            "SELECT dry_run FROM deployment_logs ORDER BY id DESC LIMIT 1",
+            None,
+        )
+        if latest_dry is None:
+            latest_dry = q(
+                "SELECT dry_run FROM optimization_decisions ORDER BY id DESC LIMIT 1",
+                None,
+            )
+        if latest_dry is not None:
+            s['dry_run'] = bool(latest_dry)
+
         try:
-            c.execute(sql)
-            res = c.fetchone()
-            return res[0] if res and res[0] is not None else default
+            for a, n in c.execute(
+                "SELECT action, COUNT(*) FROM optimization_decisions GROUP BY action"
+            ):
+                if a == 'downsize':
+                    s['down'] = n
+                elif a == 'upsize':
+                    s['up'] = n
+                elif a == 'hold':
+                    s['hold'] = n
         except Exception:
-            return default
+            pass
 
-    s['metrics']   = q("SELECT COUNT(*) FROM vm_metrics")
-    s['decisions'] = q("SELECT COUNT(*) FROM optimization_decisions")
-    s['deploys']   = q("SELECT COUNT(*) FROM deployment_logs")
-    s['savings']   = round(
-        q("SELECT COALESCE(SUM(estimated_monthly_savings),0) "
-          "FROM optimization_decisions WHERE action='downsize'", 0.0), 2
-    )
-    s['avg_cpu'] = round(
-        q("SELECT COALESCE(AVG(cpu_percent),0) FROM "
-          "(SELECT cpu_percent FROM vm_metrics "
-          "ORDER BY timestamp DESC LIMIT 72)", 0.0), 1
-    )
+        try:
+            for st, n in c.execute(
+                "SELECT status, COUNT(*) FROM deployment_logs GROUP BY status"
+            ):
+                st_l = (st or '').lower()
+                if st_l in _SUCCESS_VALUES:
+                    s['ok'] += n
+                elif st_l in _FAILURE_VALUES:
+                    s['fail'] += n
+                elif st_l == DeploymentStatus.SKIPPED.value:
+                    s['skipped'] += n
+        except Exception:
+            pass
 
-    latest_dry = q(
-        "SELECT dry_run FROM optimization_decisions "
-        "ORDER BY timestamp DESC LIMIT 1",
-        None,
-    )
-    if latest_dry is not None:
-        s['dry_run'] = bool(latest_dry)
-
-    try:
-        for a, n in c.execute(
-            "SELECT action, COUNT(*) FROM optimization_decisions GROUP BY action"
-        ):
-            if a == 'downsize':
-                s['down'] = n
-            elif a == 'upsize':
-                s['up'] = n
-            elif a == 'hold':
-                s['hold'] = n
-    except Exception:
-        pass
-
-    try:
-        for st, n in c.execute(
-            "SELECT status, COUNT(*) FROM deployment_logs GROUP BY status"
-        ):
-            st_l = (st or '').lower()
-            if st_l in ('completed', 'dry_run') or 'success' in st_l:
-                s['ok'] += n
-            elif st_l in ('failed', 'rejected', 'rolled_back'):
-                s['fail'] += n
-    except Exception:
-        pass
-
-    conn.close()
     return s
